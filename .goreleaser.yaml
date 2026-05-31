@@ -1,0 +1,40 @@
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+    - "sed -i.bak 's/\"version\": \".*\"/\"version\": \"{{ .Version }}\"/' plugin.json && rm -f plugin.json.bak"
+
+builds:
+  - id: workflow-plugin-compute-container
+    main: ./cmd/workflow-plugin-compute-container
+    binary: workflow-plugin-compute-container
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X github.com/GoCodeAlone/workflow-plugin-compute-container/internal.Version={{.Version}}
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}-{{ .Os }}-{{ .Arch }}"
+    files:
+      - plugin.json
+      - plugin.contracts.json
+      - runtime-adapters.json
+      - LICENSE
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+
+release:
+  draft: true

@@ -13,6 +13,9 @@ registry allowlists, proof/reward mutation, and worker binding.
   invocation builders, env ref resolution, artifact hashing, and digest marker
   validation.
 
+Runtime adapter metadata is published in `runtime-adapters.json` and referenced
+from `plugin.json` through `runtimeAdaptersRef`.
+
 ## Verification
 
 ```sh

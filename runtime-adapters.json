@@ -1,0 +1,33 @@
+{
+  "version": "1",
+  "protocol_version": "compute.v1alpha1",
+  "adapters": [
+    {
+      "adapter_id": "sandboxed-command",
+      "operation": "run-sandboxed-command",
+      "kinds": ["execution"],
+      "workload_kinds": ["command"],
+      "runtime_profiles": ["sandboxed-oci-v1"],
+      "workspace_policy": "required",
+      "conformance_profiles": ["sandboxed-command-v1"]
+    },
+    {
+      "adapter_id": "sandboxed-container-build",
+      "operation": "build-sandboxed-container",
+      "kinds": ["execution"],
+      "workload_kinds": ["container-build"],
+      "runtime_profiles": ["container-build-v1"],
+      "workspace_policy": "required",
+      "conformance_profiles": ["container-build-v1"]
+    }
+  ],
+  "host_owned_responsibilities": [
+    "task-admission",
+    "leases",
+    "authorization",
+    "credential-resolution",
+    "registry-allowlists",
+    "proof-reward-mutation",
+    "worker-binding"
+  ]
+}
