@@ -4,7 +4,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	container "github.com/GoCodeAlone/workflow-plugin-compute-container/container"
+	core "github.com/GoCodeAlone/workflow-plugin-compute-core/protocol"
 )
 
 func TestManifest(t *testing.T) {
@@ -40,15 +44,27 @@ func TestPluginJSONReferencesRuntimeAdapters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var catalog struct {
-		ProtocolVersion           string `json:"protocolVersion"`
-		Adapters                  []any  `json:"adapters"`
-		HostOwnedResponsibilities []any  `json:"hostOwnedResponsibilities"`
-	}
+	var catalog container.RuntimeAdapterCatalogDocument
 	if err := json.Unmarshal(adapters, &catalog); err != nil {
 		t.Fatal(err)
 	}
-	if catalog.ProtocolVersion == "" || len(catalog.Adapters) != 2 || len(catalog.HostOwnedResponsibilities) == 0 {
+	if err := catalog.Validate(); err != nil {
+		t.Fatalf("runtime adapter catalog invalid: %v", err)
+	}
+	if len(catalog.Adapters) != 2 {
 		t.Fatalf("runtime adapter catalog incomplete: %+v", catalog)
+	}
+	for _, adapter := range catalog.Adapters {
+		contract := adapter.Contract(core.RuntimeDescriptor{
+			Name:                  adapter.AdapterID,
+			Version:               "v1.0.0",
+			ExecutionSecurityTier: core.ExecutionSandboxedContainer,
+			ProofTier:             core.ProofArtifactHash,
+			ImageDigest:           "sha256:" + strings.Repeat("a", 64),
+			RootFSDigest:          "sha256:" + strings.Repeat("b", 64),
+		})
+		if err := contract.Validate(); err != nil {
+			t.Fatalf("runtime adapter contract for %s invalid: %v", adapter.AdapterID, err)
+		}
 	}
 }

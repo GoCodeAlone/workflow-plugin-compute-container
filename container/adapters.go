@@ -136,6 +136,87 @@ type SandboxRuntimeContainerBuildAdapter struct {
 	Runtime SandboxRuntime
 }
 
+type RuntimeAdapterCatalogDocument struct {
+	Version                   string                       `json:"version"`
+	ProtocolVersion           string                       `json:"protocol_version"`
+	Adapters                  []RuntimeAdapterCatalogEntry `json:"adapters"`
+	HostOwnedResponsibilities []string                     `json:"host_owned_responsibilities"`
+}
+
+func (d RuntimeAdapterCatalogDocument) Validate() error {
+	var errs []error
+	if d.Version == "" {
+		errs = append(errs, errors.New("version is required"))
+	}
+	if d.ProtocolVersion != core.Version {
+		errs = append(errs, fmt.Errorf("protocol_version = %q, want %q", d.ProtocolVersion, core.Version))
+	}
+	if len(d.Adapters) == 0 {
+		errs = append(errs, errors.New("at least one adapter is required"))
+	}
+	for i, adapter := range d.Adapters {
+		if err := adapter.Validate(); err != nil {
+			errs = append(errs, fmt.Errorf("adapters[%d]: %w", i, err))
+		}
+	}
+	if len(d.HostOwnedResponsibilities) == 0 {
+		errs = append(errs, errors.New("host_owned_responsibilities is required"))
+	}
+	return errors.Join(errs...)
+}
+
+type RuntimeAdapterCatalogEntry struct {
+	AdapterID           string                      `json:"adapter_id"`
+	Operation           string                      `json:"operation"`
+	Kinds               []core.RuntimeAdapterKind   `json:"kinds"`
+	WorkloadKinds       []core.WorkloadKind         `json:"workload_kinds"`
+	RuntimeProfiles     []core.RuntimeProfile       `json:"runtime_profiles"`
+	WorkspacePolicy     core.RuntimeWorkspacePolicy `json:"workspace_policy"`
+	ConformanceProfiles []string                    `json:"conformance_profiles"`
+}
+
+func (e RuntimeAdapterCatalogEntry) Validate() error {
+	var errs []error
+	if e.AdapterID == "" {
+		errs = append(errs, errors.New("adapter_id is required"))
+	}
+	if e.Operation == "" {
+		errs = append(errs, errors.New("operation is required"))
+	}
+	if len(e.Kinds) == 0 {
+		errs = append(errs, errors.New("kinds is required"))
+	}
+	if len(e.WorkloadKinds) == 0 {
+		errs = append(errs, errors.New("workload_kinds is required"))
+	}
+	if len(e.RuntimeProfiles) == 0 {
+		errs = append(errs, errors.New("runtime_profiles is required"))
+	}
+	if e.WorkspacePolicy == "" {
+		errs = append(errs, errors.New("workspace_policy is required"))
+	}
+	if len(e.ConformanceProfiles) == 0 {
+		errs = append(errs, errors.New("conformance_profiles is required"))
+	}
+	return errors.Join(errs...)
+}
+
+func (e RuntimeAdapterCatalogEntry) Contract(descriptor core.RuntimeDescriptor) core.RuntimeAdapterContract {
+	if descriptor.Name == "" {
+		descriptor.Name = e.AdapterID
+	}
+	return core.RuntimeAdapterContract{
+		ProtocolVersion:     core.Version,
+		AdapterID:           e.AdapterID,
+		Descriptor:          descriptor,
+		Kinds:               slices.Clone(e.Kinds),
+		WorkloadKinds:       slices.Clone(e.WorkloadKinds),
+		RuntimeProfiles:     slices.Clone(e.RuntimeProfiles),
+		WorkspacePolicy:     e.WorkspacePolicy,
+		ConformanceProfiles: slices.Clone(e.ConformanceProfiles),
+	}
+}
+
 func SandboxedCommandContract(descriptor core.RuntimeDescriptor) core.RuntimeAdapterContract {
 	if descriptor.Name == "" {
 		descriptor.Name = SandboxedCommandProviderName
@@ -361,13 +442,15 @@ func (a SandboxRuntimeContainerBuildAdapter) BuildSandboxedContainer(ctx context
 	digestPath := filepath.Join(invocation.Workspace, sandboxedContainerBuildDigestFile)
 	started := time.Now().UTC()
 	runEnv := map[string]string{
-		"WORKFLOW_COMPUTE_BUILD_CONTEXT":     CleanContainerPath(workload.ContextDirectory),
-		"WORKFLOW_COMPUTE_BUILD_DOCKERFILE":  dockerfile,
-		"WORKFLOW_COMPUTE_BUILD_TAG":         firstTag(workload.Tags),
-		"WORKFLOW_COMPUTE_BUILD_TAGS":        mustJSON(workload.Tags),
-		"WORKFLOW_COMPUTE_BUILD_STATE_DIR":   SandboxedContainerBuildStateDir,
-		"WORKFLOW_COMPUTE_BUILD_DIGEST_FILE": SandboxedContainerBuildDigestPath,
-		"WORKFLOW_COMPUTE_BUILD_PUSH":        fmt.Sprintf("%t", push),
+		"WORKFLOW_COMPUTE_BUILD_CONTEXT":         CleanContainerPath(workload.ContextDirectory),
+		"WORKFLOW_COMPUTE_BUILD_DOCKERFILE":      dockerfile,
+		"WORKFLOW_COMPUTE_BUILD_TAG":             firstTag(workload.Tags),
+		"WORKFLOW_COMPUTE_BUILD_TAGS":            mustJSON(workload.Tags),
+		"WORKFLOW_COMPUTE_BUILD_PULL_TARGET_REF": workload.PullTargetRef,
+		"WORKFLOW_COMPUTE_BUILD_PUSH_TARGET_REF": workload.PushTargetRef,
+		"WORKFLOW_COMPUTE_BUILD_STATE_DIR":       SandboxedContainerBuildStateDir,
+		"WORKFLOW_COMPUTE_BUILD_DIGEST_FILE":     SandboxedContainerBuildDigestPath,
+		"WORKFLOW_COMPUTE_BUILD_PUSH":            fmt.Sprintf("%t", push),
 	}
 	for key, value := range invocation.Request.Env {
 		if strings.HasPrefix(key, "WORKFLOW_COMPUTE_BUILD_") {
@@ -464,15 +547,23 @@ func ContainerBuildEnv(workload core.ContainerBuildWorkload, resolved map[string
 }
 
 func ResolveContainerBuildPaths(workspace string, workload core.ContainerBuildWorkload) (string, string, error) {
-	contextDir, err := resolveInside(filepath.Clean(workspace), workload.ContextDirectory)
+	root := filepath.Clean(workspace)
+	contextDir, err := resolveInside(root, workload.ContextDirectory)
 	if err != nil {
+		return "", "", err
+	}
+	if err := rejectSymlinkPathComponents(root, contextDir); err != nil {
 		return "", "", err
 	}
 	dockerfile := workload.Dockerfile
 	if dockerfile == "" {
 		dockerfile = "Dockerfile"
 	}
-	if _, err := resolveInside(contextDir, dockerfile); err != nil {
+	dockerfilePath, err := resolveInside(contextDir, dockerfile)
+	if err != nil {
+		return "", "", err
+	}
+	if err := rejectSymlinkPathComponents(contextDir, dockerfilePath); err != nil {
 		return "", "", err
 	}
 	return contextDir, dockerfile, nil

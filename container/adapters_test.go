@@ -217,6 +217,76 @@ func TestContainerBuildPassesAllTagsAsJSON(t *testing.T) {
 	}
 }
 
+func TestContainerBuildPassesPushAndPullTargetRefs(t *testing.T) {
+	runtime := &recordingSandboxRuntime{
+		result: SandboxRunResult{ArtifactHash: "sha256:" + strings.Repeat("a", 64)},
+	}
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "Dockerfile"), []byte("FROM scratch\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	invocation, err := NewSandboxedContainerBuildInvocation(SandboxedContainerBuildInvocationOptions{
+		TaskID:    "task-2",
+		LeaseID:   "lease-2",
+		Image:     "builder-image",
+		Workspace: workspace,
+		Workload: core.ContainerBuildWorkload{
+			ContextDirectory: ".",
+			Tags:             []string{"example:one"},
+			PushTargetRef:    "push://registry/app",
+			PullTargetRef:    "pull://registry/base",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (SandboxRuntimeContainerBuildAdapter{Runtime: runtime}).BuildSandboxedContainer(context.Background(), invocation); err != nil {
+		t.Fatal(err)
+	}
+	if got := runtime.request.Env["WORKFLOW_COMPUTE_BUILD_PUSH_TARGET_REF"]; got != "push://registry/app" {
+		t.Fatalf("push target env = %q", got)
+	}
+	if got := runtime.request.Env["WORKFLOW_COMPUTE_BUILD_PULL_TARGET_REF"]; got != "pull://registry/base" {
+		t.Fatalf("pull target env = %q", got)
+	}
+}
+
+func TestContainerBuildRejectsSymlinkedContextAndDockerfilePaths(t *testing.T) {
+	t.Run("context", func(t *testing.T) {
+		workspace := t.TempDir()
+		outside := t.TempDir()
+		if err := os.Symlink(outside, filepath.Join(workspace, "context-link")); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		_, _, err := ResolveContainerBuildPaths(workspace, core.ContainerBuildWorkload{
+			ContextDirectory: "context-link",
+			Dockerfile:       "Dockerfile",
+			Tags:             []string{"example:test"},
+		})
+		if err == nil || !strings.Contains(err.Error(), "is a symlink") {
+			t.Fatalf("expected symlinked context rejection, got %v", err)
+		}
+	})
+	t.Run("dockerfile", func(t *testing.T) {
+		workspace := t.TempDir()
+		outside := t.TempDir()
+		if err := os.WriteFile(filepath.Join(outside, "Dockerfile"), []byte("FROM scratch\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(outside, "Dockerfile"), filepath.Join(workspace, "Dockerfile")); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		_, _, err := ResolveContainerBuildPaths(workspace, core.ContainerBuildWorkload{
+			ContextDirectory: ".",
+			Dockerfile:       "Dockerfile",
+			Tags:             []string{"example:test"},
+		})
+		if err == nil || !strings.Contains(err.Error(), "is a symlink") {
+			t.Fatalf("expected symlinked dockerfile rejection, got %v", err)
+		}
+	})
+}
+
 func TestCommandArtifactHashRejectsSymlinkPathComponents(t *testing.T) {
 	workspace := t.TempDir()
 	outside := t.TempDir()

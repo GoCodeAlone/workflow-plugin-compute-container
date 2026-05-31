@@ -1,27 +1,27 @@
 {
   "version": "1",
-  "protocolVersion": "compute.v1alpha1",
+  "protocol_version": "compute.v1alpha1",
   "adapters": [
     {
-      "adapterId": "sandboxed-command",
+      "adapter_id": "sandboxed-command",
       "operation": "run-sandboxed-command",
       "kinds": ["execution"],
-      "workloadKinds": ["command"],
-      "runtimeProfiles": ["sandboxed-oci-v1"],
-      "workspacePolicy": "required",
-      "conformanceProfiles": ["sandboxed-command-v1"]
+      "workload_kinds": ["command"],
+      "runtime_profiles": ["sandboxed-oci-v1"],
+      "workspace_policy": "required",
+      "conformance_profiles": ["sandboxed-command-v1"]
     },
     {
-      "adapterId": "sandboxed-container-build",
+      "adapter_id": "sandboxed-container-build",
       "operation": "build-sandboxed-container",
       "kinds": ["execution"],
-      "workloadKinds": ["container-build"],
-      "runtimeProfiles": ["container-build-v1"],
-      "workspacePolicy": "required",
-      "conformanceProfiles": ["container-build-v1"]
+      "workload_kinds": ["container-build"],
+      "runtime_profiles": ["container-build-v1"],
+      "workspace_policy": "required",
+      "conformance_profiles": ["container-build-v1"]
     }
   ],
-  "hostOwnedResponsibilities": [
+  "host_owned_responsibilities": [
     "task-admission",
     "leases",
     "authorization",
