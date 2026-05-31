@@ -250,6 +250,9 @@ func SandboxedContainerBuildContract(descriptor core.RuntimeDescriptor) core.Run
 }
 
 func NewSandboxedCommandInvocation(opts SandboxedCommandInvocationOptions) (SandboxedCommandRuntimeInvocation, error) {
+	if strings.TrimSpace(opts.Workspace) == "" {
+		return SandboxedCommandRuntimeInvocation{}, errors.New("workspace is required")
+	}
 	if err := opts.Workload.Validate(); err != nil {
 		return SandboxedCommandRuntimeInvocation{}, err
 	}
@@ -547,6 +550,9 @@ func ContainerBuildEnv(workload core.ContainerBuildWorkload, resolved map[string
 }
 
 func ResolveContainerBuildPaths(workspace string, workload core.ContainerBuildWorkload) (string, string, error) {
+	if strings.TrimSpace(workspace) == "" {
+		return "", "", errors.New("workspace is required")
+	}
 	root := filepath.Clean(workspace)
 	contextDir, err := resolveInside(root, workload.ContextDirectory)
 	if err != nil {

@@ -52,6 +52,20 @@ func TestSandboxedCommandInvocationResolvesEnvRefsAndStripsPayloadRefs(t *testin
 	}
 }
 
+func TestSandboxedCommandInvocationRequiresWorkspace(t *testing.T) {
+	_, err := NewSandboxedCommandInvocation(SandboxedCommandInvocationOptions{
+		TaskID:  "task-1",
+		LeaseID: "lease-1",
+		Image:   "sandbox-image",
+		Workload: core.CommandWorkload{
+			Args: []string{"true"},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "workspace is required") {
+		t.Fatalf("expected workspace rejection, got %v", err)
+	}
+}
+
 func TestSandboxRuntimeCommandAdapterRunsHardenedSandboxAndHashesArtifacts(t *testing.T) {
 	workspace := t.TempDir()
 	if err := os.Mkdir(filepath.Join(workspace, "work"), 0o700); err != nil {
@@ -185,6 +199,21 @@ func TestContainerBuildRejectsReservedControlEnvOverride(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "reserved workflow-compute build env") {
 		t.Fatalf("expected reserved env rejection, got %v", err)
+	}
+}
+
+func TestContainerBuildInvocationRequiresWorkspace(t *testing.T) {
+	_, err := NewSandboxedContainerBuildInvocation(SandboxedContainerBuildInvocationOptions{
+		TaskID:  "task-2",
+		LeaseID: "lease-2",
+		Image:   "builder-image",
+		Workload: core.ContainerBuildWorkload{
+			ContextDirectory: ".",
+			Tags:             []string{"example:test"},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "workspace is required") {
+		t.Fatalf("expected workspace rejection, got %v", err)
 	}
 }
 
