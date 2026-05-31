@@ -1,0 +1,32 @@
+{
+  "name": "workflow-plugin-compute-container",
+  "version": "0.0.0",
+  "description": "Public command and container-build runtime adapter plugin for Workflow Compute.",
+  "author": "GoCodeAlone",
+  "license": "MIT",
+  "type": "external",
+  "tier": "community",
+  "private": false,
+  "minEngineVersion": "0.64.7",
+  "keywords": [
+    "compute",
+    "container-build",
+    "runtime-adapter"
+  ],
+  "homepage": "https://github.com/GoCodeAlone/workflow-plugin-compute-container",
+  "repository": "https://github.com/GoCodeAlone/workflow-plugin-compute-container",
+  "runtimeAdaptersRef": "runtime-adapters.json",
+  "dependencies": [
+    {
+      "name": "workflow-plugin-compute-core",
+      "constraint": ">=0.3.1"
+    }
+  ],
+  "capabilities": {
+    "configProvider": false,
+    "moduleTypes": [],
+    "stepTypes": [],
+    "triggerTypes": []
+  },
+  "contracts": []
+}
