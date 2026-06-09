@@ -1,4 +1,13 @@
 {
   "version": "1",
-  "contracts": []
+  "contracts": [],
+  "protocolTypes": [
+    {
+      "name": "RuntimeBackendReport",
+      "wire": "json",
+      "goType": "github.com/GoCodeAlone/workflow-plugin-compute-core/protocol.RuntimeBackendReport",
+      "protocolVersion": "compute.v1alpha1",
+      "producedBy": ["DockerCompatibleRuntimeProbes"]
+    }
+  ]
 }

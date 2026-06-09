@@ -140,6 +140,7 @@ type RuntimeAdapterCatalogDocument struct {
 	Version                   string                       `json:"version"`
 	ProtocolVersion           string                       `json:"protocol_version"`
 	Adapters                  []RuntimeAdapterCatalogEntry `json:"adapters"`
+	RuntimeBackends           []RuntimeBackendCatalogEntry `json:"runtime_backends,omitempty"`
 	HostOwnedResponsibilities []string                     `json:"host_owned_responsibilities"`
 }
 
@@ -157,6 +158,11 @@ func (d RuntimeAdapterCatalogDocument) Validate() error {
 	for i, adapter := range d.Adapters {
 		if err := adapter.Validate(); err != nil {
 			errs = append(errs, fmt.Errorf("adapters[%d]: %w", i, err))
+		}
+	}
+	for i, backend := range d.RuntimeBackends {
+		if err := backend.Validate(); err != nil {
+			errs = append(errs, fmt.Errorf("runtime_backends[%d]: %w", i, err))
 		}
 	}
 	if len(d.HostOwnedResponsibilities) == 0 {
@@ -215,6 +221,46 @@ func (e RuntimeAdapterCatalogEntry) Contract(descriptor core.RuntimeDescriptor) 
 		WorkspacePolicy:     e.WorkspacePolicy,
 		ConformanceProfiles: slices.Clone(e.ConformanceProfiles),
 	}
+}
+
+type RuntimeBackendCatalogEntry struct {
+	BackendID           string                      `json:"backend_id"`
+	Families            []core.RuntimeBackendFamily `json:"families"`
+	Tools               []core.ContainerRuntimeTool `json:"tools"`
+	IsolationModes      []core.RuntimeIsolationMode `json:"isolation_modes"`
+	InstallBurdens      []core.RuntimeInstallBurden `json:"install_burdens"`
+	RuntimeProfiles     []core.RuntimeProfile       `json:"runtime_profiles"`
+	ExecutorProviders   []string                    `json:"executor_providers"`
+	ConformanceProfiles []string                    `json:"conformance_profiles"`
+}
+
+func (e RuntimeBackendCatalogEntry) Validate() error {
+	var errs []error
+	if e.BackendID == "" {
+		errs = append(errs, errors.New("backend_id is required"))
+	}
+	if len(e.Families) == 0 {
+		errs = append(errs, errors.New("families is required"))
+	}
+	if len(e.Tools) == 0 {
+		errs = append(errs, errors.New("tools is required"))
+	}
+	if len(e.IsolationModes) == 0 {
+		errs = append(errs, errors.New("isolation_modes is required"))
+	}
+	if len(e.InstallBurdens) == 0 {
+		errs = append(errs, errors.New("install_burdens is required"))
+	}
+	if len(e.RuntimeProfiles) == 0 {
+		errs = append(errs, errors.New("runtime_profiles is required"))
+	}
+	if len(e.ExecutorProviders) == 0 {
+		errs = append(errs, errors.New("executor_providers is required"))
+	}
+	if len(e.ConformanceProfiles) == 0 {
+		errs = append(errs, errors.New("conformance_profiles is required"))
+	}
+	return errors.Join(errs...)
 }
 
 func SandboxedCommandContract(descriptor core.RuntimeDescriptor) core.RuntimeAdapterContract {

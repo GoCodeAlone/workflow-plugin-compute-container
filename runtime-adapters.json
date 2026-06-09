@@ -21,6 +21,18 @@
       "conformance_profiles": ["container-build-v1"]
     }
   ],
+  "runtime_backends": [
+    {
+      "backend_id": "docker-compatible",
+      "families": ["podman", "docker", "nerdctl", "containerd"],
+      "tools": ["podman", "docker", "nerdctl"],
+      "isolation_modes": ["user-namespace", "vm-backed-container", "shared-kernel-container"],
+      "install_burdens": ["system-installed", "desktop-managed"],
+      "runtime_profiles": ["sandboxed-oci-v1", "container-build-v1"],
+      "executor_providers": ["sandboxed-command", "sandboxed-container-build"],
+      "conformance_profiles": ["distroless-static-v1"]
+    }
+  ],
   "host_owned_responsibilities": [
     "task-admission",
     "leases",
