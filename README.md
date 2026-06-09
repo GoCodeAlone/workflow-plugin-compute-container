@@ -40,6 +40,11 @@ image, matching the compute-agent direct probe command convention for distroless
 probe images. A raw upstream distroless base image will usually return a
 degraded report until a purpose-built probe binary image is supplied.
 
+Conformance commands run with `--network none`, a temporary workspace mounted at
+`/workspace`, `WFCOMPUTE_RUNTIME_PROBE=1`, and a read-only root filesystem. The
+probe image must emit a `RuntimeBackendEvidence` JSON payload proving workspace,
+network, env, proof, and cleanup behavior under those constraints.
+
 ## Verification
 
 ```sh
