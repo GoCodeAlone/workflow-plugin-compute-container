@@ -230,6 +230,9 @@ func runtimeBackendConformanceWorkspace(opts RuntimeBackendProbeOptions) (string
 		if err := os.MkdirAll(workspace, 0o700); err != nil {
 			return "", func() {}, err
 		}
+		if err := os.Chmod(workspace, 0o777); err != nil {
+			return "", func() {}, err
+		}
 		info, err := os.Stat(workspace)
 		if err != nil {
 			return "", func() {}, err
@@ -241,6 +244,10 @@ func runtimeBackendConformanceWorkspace(opts RuntimeBackendProbeOptions) (string
 	}
 	dir, err := os.MkdirTemp("", "wfcompute-runtime-probe-*")
 	if err != nil {
+		return "", func() {}, err
+	}
+	if err := os.Chmod(dir, 0o777); err != nil {
+		_ = os.RemoveAll(dir)
 		return "", func() {}, err
 	}
 	return dir, func() { _ = os.RemoveAll(dir) }, nil
