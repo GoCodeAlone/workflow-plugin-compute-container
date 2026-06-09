@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -221,8 +222,22 @@ func (opts RuntimeBackendProbeOptions) withDefaults() RuntimeBackendProbeOptions
 }
 
 func runtimeBackendConformanceWorkspace(opts RuntimeBackendProbeOptions) (string, func(), error) {
-	if strings.TrimSpace(opts.ConformanceWorkspace) != "" {
-		return opts.ConformanceWorkspace, func() {}, nil
+	if configured := strings.TrimSpace(opts.ConformanceWorkspace); configured != "" {
+		workspace, err := filepath.Abs(configured)
+		if err != nil {
+			return "", func() {}, err
+		}
+		if err := os.MkdirAll(workspace, 0o700); err != nil {
+			return "", func() {}, err
+		}
+		info, err := os.Stat(workspace)
+		if err != nil {
+			return "", func() {}, err
+		}
+		if !info.IsDir() {
+			return "", func() {}, fmt.Errorf("runtime conformance workspace %q is not a directory", workspace)
+		}
+		return workspace, func() {}, nil
 	}
 	dir, err := os.MkdirTemp("", "wfcompute-runtime-probe-*")
 	if err != nil {

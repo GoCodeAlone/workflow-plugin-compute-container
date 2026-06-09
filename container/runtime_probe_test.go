@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -223,6 +224,41 @@ func TestRuntimeBackendProbeRunsConformanceWithWorkspaceEnvAndReadOnlyRoot(t *te
 		}
 	}
 	t.Fatalf("missing conformance run call: %+v", calls)
+}
+
+func TestRuntimeBackendConformanceWorkspaceNormalizesConfiguredPath(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	workspace, cleanup, err := runtimeBackendConformanceWorkspace(RuntimeBackendProbeOptions{
+		ConformanceWorkspace: "relative-probe-workspace",
+	})
+	t.Cleanup(cleanup)
+	if err != nil {
+		t.Fatalf("conformance workspace: %v", err)
+	}
+	if !filepath.IsAbs(workspace) {
+		t.Fatalf("workspace path is not absolute: %q", workspace)
+	}
+	info, err := os.Stat(workspace)
+	if err != nil {
+		t.Fatalf("workspace was not created: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("workspace is not a directory: %s", workspace)
+	}
+}
+
+func TestRuntimeBackendConformanceWorkspaceRejectsFilePath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "workspace-file")
+	if err := os.WriteFile(path, []byte("not a dir"), 0o600); err != nil {
+		t.Fatalf("write workspace file: %v", err)
+	}
+
+	_, _, err := runtimeBackendConformanceWorkspace(RuntimeBackendProbeOptions{ConformanceWorkspace: path})
+
+	if err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("workspace file err = %v", err)
+	}
 }
 
 func TestDockerCompatibleRuntimeProbeRealBackends(t *testing.T) {
