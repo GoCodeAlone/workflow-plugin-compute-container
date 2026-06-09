@@ -1,6 +1,7 @@
 package container
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -341,4 +342,92 @@ func TestDockerCompatibleRuntimeRejectsUnsafeRuntimeScopeArgs(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "runtime scope") {
 		t.Fatalf("expected unsafe runtime scope rejection, got %v", err)
 	}
+}
+
+func TestDockerCompatibleRuntimeAllowsMountAtRequiredPrefix(t *testing.T) {
+	dir := t.TempDir()
+	hostPath, containerPath, err := validateSandboxMount(SandboxMount{
+		HostPath:       dir,
+		ContainerPath:  "/data",
+		RequiredPrefix: dir,
+	})
+	if err != nil {
+		t.Fatalf("mount at required prefix rejected: %v", err)
+	}
+	if hostPath != filepath.Clean(dir) || containerPath != "/data" {
+		t.Fatalf("mount normalized to host=%q container=%q", hostPath, containerPath)
+	}
+}
+
+func TestDockerCompatibleRuntimeRestoresRecursiveWorkspacePermissions(t *testing.T) {
+	workspace := t.TempDir()
+	nested := filepath.Join(workspace, "nested")
+	file := filepath.Join(nested, "script.sh")
+	if err := os.Chmod(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte("#!/bin/sh\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	spec, cleanup, err := (DockerSandboxRuntime{}).prepareRun(SandboxRunRequest{
+		Image:     "ghcr.io/gocodealone/container-builder:latest",
+		Command:   []string{"/usr/local/bin/wfcompute-container-builder"},
+		Workspace: workspace,
+		RunAsRoot: true,
+	})
+	if err != nil {
+		t.Fatalf("prepare run: %v", err)
+	}
+	_ = spec
+	cleanup()
+	for path, want := range map[string]os.FileMode{
+		workspace: 0o700,
+		nested:    0o700,
+		file:      0o600,
+	} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Fatalf("%s mode after cleanup: got %o want %o", path, got, want)
+		}
+	}
+}
+
+func TestDockerCompatibleRuntimeReturnsExitCode(t *testing.T) {
+	result, err := (DockerSandboxRuntime{Runner: fakeDockerCommandRunner{err: fakeExitError(17)}}).Run(t.Context(), SandboxRunRequest{
+		Image:     "image",
+		Command:   []string{"cmd"},
+		Workspace: t.TempDir(),
+	})
+	if err == nil {
+		t.Fatal("expected runtime error")
+	}
+	if result.ExitCode != 17 {
+		t.Fatalf("exit code not populated on runtime failure: %+v err=%v", result, err)
+	}
+}
+
+type fakeDockerCommandRunner struct {
+	stdout []byte
+	stderr []byte
+	err    error
+}
+
+func (r fakeDockerCommandRunner) CombinedOutput(context.Context, []byte, string, ...string) ([]byte, []byte, error) {
+	return r.stdout, r.stderr, r.err
+}
+
+type fakeExitError int
+
+func (e fakeExitError) Error() string {
+	return fmt.Sprintf("exit status %d", e)
+}
+
+func (e fakeExitError) ExitCode() int {
+	return int(e)
 }

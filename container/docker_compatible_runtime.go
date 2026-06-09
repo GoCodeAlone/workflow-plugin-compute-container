@@ -20,6 +20,17 @@ import (
 type DockerSandboxRuntime struct {
 	Tool        string
 	RuntimeName string
+	Runner      DockerCommandRunner
+}
+
+type DockerCommandRunner interface {
+	CombinedOutput(ctx context.Context, stdin []byte, name string, args ...string) ([]byte, []byte, error)
+}
+
+type ExecDockerCommandRunner struct{}
+
+func (ExecDockerCommandRunner) CombinedOutput(ctx context.Context, stdin []byte, name string, args ...string) ([]byte, []byte, error) {
+	return splitOutputContextWithStdin(ctx, stdin, name, args...)
 }
 
 type dockerRunSpec struct {
@@ -31,7 +42,7 @@ type dockerRunSpec struct {
 
 func (r DockerSandboxRuntime) Available(ctx context.Context) error {
 	tool := firstNonEmpty(r.Tool, "docker")
-	out, err := combinedOutputContext(ctx, tool, "version")
+	out, _, err := r.commandRunner().CombinedOutput(ctx, nil, tool, "version")
 	if err != nil && len(out) > 0 {
 		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -44,20 +55,32 @@ func (r DockerSandboxRuntime) Run(ctx context.Context, req SandboxRunRequest) (S
 		return SandboxRunResult{}, err
 	}
 	defer cleanup()
-	stdout, stderr, err := splitOutputContextWithStdin(ctx, req.Stdin, spec.Tool, spec.CommandArgs()...)
+	stdout, stderr, err := r.commandRunner().CombinedOutput(ctx, req.Stdin, spec.Tool, spec.CommandArgs()...)
+	exitCode := 0
+	if err != nil {
+		exitCode = commandExitCode(err)
+	}
 	if err != nil && len(stderr) > 0 {
 		err = fmt.Errorf("%w: %s", err, strings.TrimSpace(string(stderr)))
 	} else if err != nil && len(stdout) > 0 {
 		err = fmt.Errorf("%w: %s", err, strings.TrimSpace(string(stdout)))
 	}
 	return SandboxRunResult{
-		Stdout: stdout,
-		Stderr: stderr,
+		ExitCode: exitCode,
+		Stdout:   stdout,
+		Stderr:   stderr,
 		ResourceUsage: core.ResourceUsage{
 			OutputBytes:    int64(len(stdout) + len(stderr)),
 			WorkspaceBytes: DirectorySize(req.Workspace),
 		},
 	}, err
+}
+
+func (r DockerSandboxRuntime) commandRunner() DockerCommandRunner {
+	if r.Runner != nil {
+		return r.Runner
+	}
+	return ExecDockerCommandRunner{}
 }
 
 func (r DockerSandboxRuntime) prepareRun(req SandboxRunRequest) (dockerRunSpec, func(), error) {
@@ -199,22 +222,25 @@ func validManagedSandboxNetwork(value string) bool {
 }
 
 func makeWorkspaceSandboxReadable(workspace string) (func(), error) {
-	info, err := os.Stat(workspace)
+	original, err := chmodSandboxReadableTree(workspace)
 	if err != nil {
-		return func() {}, fmt.Errorf("stat sandbox workspace: %w", err)
-	}
-	original := info.Mode().Perm()
-	if err := chmodSandboxReadableTree(workspace); err != nil {
-		_ = os.Chmod(workspace, original)
 		return func() {}, err
 	}
 	return func() {
-		_ = os.Chmod(workspace, original)
+		for i := len(original) - 1; i >= 0; i-- {
+			_ = os.Chmod(original[i].path, original[i].mode)
+		}
 	}, nil
 }
 
-func chmodSandboxReadableTree(workspace string) error {
-	return filepath.WalkDir(workspace, func(path string, entry os.DirEntry, walkErr error) error {
+type sandboxPathMode struct {
+	path string
+	mode os.FileMode
+}
+
+func chmodSandboxReadableTree(workspace string) ([]sandboxPathMode, error) {
+	var original []sandboxPathMode
+	err := filepath.WalkDir(workspace, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -222,6 +248,7 @@ func chmodSandboxReadableTree(workspace string) error {
 		if err != nil {
 			return fmt.Errorf("stat sandbox workspace path %s: %w", path, err)
 		}
+		original = append(original, sandboxPathMode{path: path, mode: info.Mode().Perm()})
 		switch {
 		case info.Mode().IsDir():
 			if err := os.Chmod(path, dockerSandboxReadableDirMode(info.Mode().Perm())); err != nil {
@@ -234,6 +261,13 @@ func chmodSandboxReadableTree(workspace string) error {
 		}
 		return nil
 	})
+	if err != nil {
+		for i := len(original) - 1; i >= 0; i-- {
+			_ = os.Chmod(original[i].path, original[i].mode)
+		}
+		return nil, err
+	}
+	return original, nil
 }
 
 func dockerSandboxReadableDirMode(mode os.FileMode) os.FileMode {
@@ -363,7 +397,7 @@ func validateSandboxMount(mount SandboxMount) (string, string, error) {
 		}
 		prefix = filepath.Clean(prefix)
 		rel, err := filepath.Rel(prefix, absHost)
-		if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return "", "", fmt.Errorf("sandbox mount %q escapes required prefix", absHost)
 		}
 	}
@@ -439,4 +473,15 @@ func splitOutputContextWithStdin(ctx context.Context, stdin []byte, name string,
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	return stdout.Bytes(), stderr.Bytes(), err
+}
+
+func commandExitCode(err error) int {
+	if err == nil {
+		return 0
+	}
+	var exitCoder interface{ ExitCode() int }
+	if errors.As(err, &exitCoder) {
+		return exitCoder.ExitCode()
+	}
+	return -1
 }

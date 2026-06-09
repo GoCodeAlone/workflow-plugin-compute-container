@@ -71,17 +71,28 @@ func TestPluginJSONReferencesRuntimeAdapters(t *testing.T) {
 	if len(catalog.Adapters) != 2 {
 		t.Fatalf("runtime adapter catalog incomplete: %+v", catalog)
 	}
-	if len(catalog.RuntimeBackends) != 1 {
+	if len(catalog.RuntimeBackends) != 3 {
 		t.Fatalf("runtime backend catalog incomplete: %+v", catalog)
 	}
-	backend := catalog.RuntimeBackends[0]
-	if backend.BackendID != "docker-compatible" ||
-		!slices.Contains(backend.Tools, core.ContainerRuntimePodman) ||
-		!slices.Contains(backend.Tools, core.ContainerRuntimeDocker) ||
-		!slices.Contains(backend.Tools, core.ContainerRuntimeNerdctl) ||
-		!slices.Contains(backend.ExecutorProviders, container.SandboxedCommandProviderName) ||
-		!slices.Contains(backend.ExecutorProviders, container.SandboxedContainerBuildProviderName) {
-		t.Fatalf("runtime backend catalog missing Docker-compatible entries: %+v", backend)
+	wantBackends := map[string]core.ContainerRuntimeTool{
+		"podman-rootless":    core.ContainerRuntimePodman,
+		"docker-desktop":     core.ContainerRuntimeDocker,
+		"nerdctl-containerd": core.ContainerRuntimeNerdctl,
+	}
+	for _, backend := range catalog.RuntimeBackends {
+		wantTool, ok := wantBackends[backend.BackendID]
+		if !ok {
+			t.Fatalf("unexpected runtime backend catalog entry: %+v", backend)
+		}
+		if !slices.Contains(backend.Tools, wantTool) ||
+			!slices.Contains(backend.ExecutorProviders, container.SandboxedCommandProviderName) ||
+			!slices.Contains(backend.ExecutorProviders, container.SandboxedContainerBuildProviderName) {
+			t.Fatalf("runtime backend catalog missing expected entries: %+v", backend)
+		}
+		delete(wantBackends, backend.BackendID)
+	}
+	if len(wantBackends) != 0 {
+		t.Fatalf("runtime backend catalog missing entries: %+v", wantBackends)
 	}
 	for _, adapter := range catalog.Adapters {
 		contract := adapter.Contract(core.RuntimeDescriptor{
