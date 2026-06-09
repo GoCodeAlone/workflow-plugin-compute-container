@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -70,7 +71,7 @@ func TestDockerCompatibleRuntimeProbeReportsDegradedWhenConformanceFails(t *test
 			path: "/usr/bin/podman",
 			results: map[string]fakeRuntimeCommandResult{
 				"podman version --format {{.Client.Version}}": {stdout: "5.0.0\n"},
-				"podman run --rm --network none " + defaultConformanceImageRef + " " + defaultConformanceCommand: {
+				defaultRuntimeConformanceCommandKey("podman"): {
 					err: errors.New("registry credential token rejected"),
 				},
 			},
@@ -103,7 +104,7 @@ func TestDockerCompatibleRuntimeProbeReportsSupportedProfiles(t *testing.T) {
 			path: "/usr/bin/podman",
 			results: map[string]fakeRuntimeCommandResult{
 				"podman version --format {{.Client.Version}}": {stdout: "5.0.0\n"},
-				"podman run --rm --network none " + defaultConformanceImageRef + " " + defaultConformanceCommand: {
+				defaultRuntimeConformanceCommandKey("podman"): {
 					stdout: validRuntimeEvidenceJSON(),
 				},
 			},
@@ -144,7 +145,7 @@ func TestDockerCompatibleRuntimeProbeRequiresFullEvidencePayload(t *testing.T) {
 			path: "/usr/bin/podman",
 			results: map[string]fakeRuntimeCommandResult{
 				"podman version --format {{.Client.Version}}": {stdout: "5.0.0\n"},
-				"podman run --rm --network none " + defaultConformanceImageRef + " " + defaultConformanceCommand: {
+				defaultRuntimeConformanceCommandKey("podman"): {
 					stdout: `{"workspace":true,"network":true,"env":true,"proof":true}`,
 				},
 			},
@@ -168,7 +169,7 @@ func TestDockerCompatibleRuntimeProbeOnlyAdvertisesRequestedProfiles(t *testing.
 			path: "/usr/bin/podman",
 			results: map[string]fakeRuntimeCommandResult{
 				"podman version --format {{.Client.Version}}": {stdout: "5.0.0\n"},
-				"podman run --rm --network none " + defaultConformanceImageRef + " " + defaultConformanceCommand: {
+				defaultRuntimeConformanceCommandKey("podman"): {
 					stdout: validRuntimeEvidenceJSON(),
 				},
 			},
@@ -182,6 +183,81 @@ func TestDockerCompatibleRuntimeProbeOnlyAdvertisesRequestedProfiles(t *testing.
 	}
 	if len(report.Executors) != 1 || report.Executors[0].Provider != SandboxedCommandProviderName {
 		t.Fatalf("executors = %+v", report.Executors)
+	}
+}
+
+func TestRuntimeBackendProbeRunsConformanceWithWorkspaceEnvAndReadOnlyRoot(t *testing.T) {
+	var calls []string
+	probe := RuntimeBackendProbe{
+		Options: podmanProbeOptions([]core.RuntimeProfile{core.RuntimeProfileSandboxedOCI}),
+		Runner: &fakeRuntimeCommandRunner{
+			path:  "/usr/bin/podman",
+			calls: &calls,
+			results: map[string]fakeRuntimeCommandResult{
+				"podman version --format {{.Client.Version}}": {stdout: "5.0.0\n"},
+				defaultRuntimeConformanceCommandKey("podman"): {
+					stdout: validRuntimeEvidenceJSON(),
+				},
+			},
+		},
+	}
+
+	report := probe.Probe(context.Background())
+
+	if report.Status != core.RuntimeBackendSupported {
+		t.Fatalf("probe status=%q: %+v", report.Status, report)
+	}
+	for _, call := range calls {
+		if strings.HasPrefix(call, "podman run ") {
+			for _, want := range []string{
+				"--network none",
+				"-v /tmp/wfcompute-runtime-probe-test:/workspace",
+				"-w /workspace",
+				"-e WFCOMPUTE_RUNTIME_PROBE=1",
+				"--read-only",
+			} {
+				if !strings.Contains(call, want) {
+					t.Fatalf("conformance command missing %q in %q", want, call)
+				}
+			}
+			return
+		}
+	}
+	t.Fatalf("missing conformance run call: %+v", calls)
+}
+
+func TestRuntimeBackendConformanceWorkspaceNormalizesConfiguredPath(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	workspace, cleanup, err := runtimeBackendConformanceWorkspace(RuntimeBackendProbeOptions{
+		ConformanceWorkspace: "relative-probe-workspace",
+	})
+	t.Cleanup(cleanup)
+	if err != nil {
+		t.Fatalf("conformance workspace: %v", err)
+	}
+	if !filepath.IsAbs(workspace) {
+		t.Fatalf("workspace path is not absolute: %q", workspace)
+	}
+	info, err := os.Stat(workspace)
+	if err != nil {
+		t.Fatalf("workspace was not created: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("workspace is not a directory: %s", workspace)
+	}
+}
+
+func TestRuntimeBackendConformanceWorkspaceRejectsFilePath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "workspace-file")
+	if err := os.WriteFile(path, []byte("not a dir"), 0o600); err != nil {
+		t.Fatalf("write workspace file: %v", err)
+	}
+
+	_, _, err := runtimeBackendConformanceWorkspace(RuntimeBackendProbeOptions{ConformanceWorkspace: path})
+
+	if err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("workspace file err = %v", err)
 	}
 }
 
@@ -209,19 +285,24 @@ func TestDockerCompatibleRuntimeProbeRealBackends(t *testing.T) {
 
 func podmanProbeOptions(profiles []core.RuntimeProfile) RuntimeBackendProbeOptions {
 	return RuntimeBackendProbeOptions{
-		BackendID:           "podman-rootless",
-		Family:              core.RuntimeBackendFamilyPodman,
-		Tool:                core.ContainerRuntimePodman,
-		Command:             "podman",
-		VersionArgs:         []string{"version", "--format", "{{.Client.Version}}"},
-		ConformanceImage:    defaultConformanceImageRef,
-		ConformanceCommand:  []string{defaultConformanceCommand},
-		IsolationMode:       core.RuntimeIsolationUserNamespace,
-		InstallBurden:       core.RuntimeInstallSystemInstalled,
-		RuntimeProfiles:     profiles,
-		ConformanceProfiles: []string{"distroless-static-v1"},
-		GeneratedAt:         time.Unix(1_700_000_000, 0).UTC(),
+		BackendID:            "podman-rootless",
+		Family:               core.RuntimeBackendFamilyPodman,
+		Tool:                 core.ContainerRuntimePodman,
+		Command:              "podman",
+		VersionArgs:          []string{"version", "--format", "{{.Client.Version}}"},
+		ConformanceImage:     defaultConformanceImageRef,
+		ConformanceCommand:   []string{defaultConformanceCommand},
+		ConformanceWorkspace: "/tmp/wfcompute-runtime-probe-test",
+		IsolationMode:        core.RuntimeIsolationUserNamespace,
+		InstallBurden:        core.RuntimeInstallSystemInstalled,
+		RuntimeProfiles:      profiles,
+		ConformanceProfiles:  []string{"distroless-static-v1"},
+		GeneratedAt:          time.Unix(1_700_000_000, 0).UTC(),
 	}
+}
+
+func defaultRuntimeConformanceCommandKey(tool string) string {
+	return tool + " run --rm --network none -v /tmp/wfcompute-runtime-probe-test:/workspace -w /workspace -e WFCOMPUTE_RUNTIME_PROBE=1 --read-only " + defaultConformanceImageRef + " " + defaultConformanceCommand
 }
 
 func validRuntimeEvidenceJSON() string {
@@ -251,6 +332,7 @@ type fakeRuntimeCommandRunner struct {
 	path        string
 	lookPathErr error
 	results     map[string]fakeRuntimeCommandResult
+	calls       *[]string
 }
 
 type fakeRuntimeCommandResult struct {
@@ -267,6 +349,9 @@ func (r *fakeRuntimeCommandRunner) LookPath(string) (string, error) {
 
 func (r *fakeRuntimeCommandRunner) Run(_ context.Context, name string, args ...string) (RuntimeCommandResult, error) {
 	key := strings.Join(append([]string{name}, args...), " ")
+	if r.calls != nil {
+		*r.calls = append(*r.calls, key)
+	}
 	result, ok := r.results[key]
 	if !ok {
 		return RuntimeCommandResult{}, errors.New("unexpected command: " + key)

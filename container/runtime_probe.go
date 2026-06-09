@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -53,18 +55,19 @@ func (ExecRuntimeCommandRunner) Run(ctx context.Context, name string, args ...st
 }
 
 type RuntimeBackendProbeOptions struct {
-	BackendID           string
-	Family              core.RuntimeBackendFamily
-	Tool                core.ContainerRuntimeTool
-	Command             string
-	VersionArgs         []string
-	ConformanceImage    string
-	ConformanceCommand  []string
-	IsolationMode       core.RuntimeIsolationMode
-	InstallBurden       core.RuntimeInstallBurden
-	RuntimeProfiles     []core.RuntimeProfile
-	ConformanceProfiles []string
-	GeneratedAt         time.Time
+	BackendID            string
+	Family               core.RuntimeBackendFamily
+	Tool                 core.ContainerRuntimeTool
+	Command              string
+	VersionArgs          []string
+	ConformanceImage     string
+	ConformanceCommand   []string
+	ConformanceWorkspace string
+	IsolationMode        core.RuntimeIsolationMode
+	InstallBurden        core.RuntimeInstallBurden
+	RuntimeProfiles      []core.RuntimeProfile
+	ConformanceProfiles  []string
+	GeneratedAt          time.Time
 }
 
 type RuntimeBackendProbe struct {
@@ -163,7 +166,23 @@ func (p RuntimeBackendProbe) Probe(ctx context.Context) core.RuntimeBackendRepor
 		return report
 	}
 	report.Version = sanitizeRuntimeVersion(string(versionResult.Stdout))
-	conformanceArgs := []string{"run", "--rm", "--network", SandboxNetworkNone, opts.ConformanceImage}
+	workspace, cleanup, err := runtimeBackendConformanceWorkspace(opts)
+	if err != nil {
+		report.Status = core.RuntimeBackendDegraded
+		report.Reason = redactRuntimeProbeDetail(fmt.Sprintf("runtime conformance workspace failed: %v", err))
+		return report
+	}
+	defer cleanup()
+	conformanceArgs := []string{
+		"run",
+		"--rm",
+		"--network", SandboxNetworkNone,
+		"-v", workspace + ":/workspace",
+		"-w", "/workspace",
+		"-e", "WFCOMPUTE_RUNTIME_PROBE=1",
+		"--read-only",
+		opts.ConformanceImage,
+	}
 	conformanceArgs = append(conformanceArgs, opts.ConformanceCommand...)
 	conformanceResult, err := runner.Run(ctx, opts.Command, conformanceArgs...)
 	if err != nil {
@@ -200,6 +219,31 @@ func (opts RuntimeBackendProbeOptions) withDefaults() RuntimeBackendProbeOptions
 		opts.ConformanceProfiles = []string{defaultConformanceProfile}
 	}
 	return opts
+}
+
+func runtimeBackendConformanceWorkspace(opts RuntimeBackendProbeOptions) (string, func(), error) {
+	if configured := strings.TrimSpace(opts.ConformanceWorkspace); configured != "" {
+		workspace, err := filepath.Abs(configured)
+		if err != nil {
+			return "", func() {}, err
+		}
+		if err := os.MkdirAll(workspace, 0o700); err != nil {
+			return "", func() {}, err
+		}
+		info, err := os.Stat(workspace)
+		if err != nil {
+			return "", func() {}, err
+		}
+		if !info.IsDir() {
+			return "", func() {}, fmt.Errorf("runtime conformance workspace %q is not a directory", workspace)
+		}
+		return workspace, func() {}, nil
+	}
+	dir, err := os.MkdirTemp("", "wfcompute-runtime-probe-*")
+	if err != nil {
+		return "", func() {}, err
+	}
+	return dir, func() { _ = os.RemoveAll(dir) }, nil
 }
 
 func executorClaimsForRuntimeProfiles(profiles []core.RuntimeProfile, version string) ([]string, []core.ExecutorRef) {
