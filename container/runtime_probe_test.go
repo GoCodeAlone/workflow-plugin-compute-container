@@ -246,7 +246,7 @@ func TestRuntimeBackendConformanceWorkspaceNormalizesConfiguredPath(t *testing.T
 	if !info.IsDir() {
 		t.Fatalf("workspace is not a directory: %s", workspace)
 	}
-	if got := info.Mode().Perm(); got&0o033 != 0o033 {
+	if got := info.Mode().Perm(); got&0o003 != 0o003 {
 		t.Fatalf("workspace must be writable/traversable by nonroot probe containers, mode=%o", got)
 	}
 }
@@ -265,7 +265,7 @@ func TestRuntimeBackendConformanceWorkspaceRestoresConfiguredPathMode(t *testing
 	if err != nil {
 		t.Fatalf("workspace stat during probe: %v", err)
 	}
-	if got := info.Mode().Perm(); got&0o033 != 0o033 {
+	if got := info.Mode().Perm(); got&0o003 != 0o003 {
 		t.Fatalf("configured workspace must be writable/traversable during probe, mode=%o", got)
 	}
 	cleanup()
@@ -301,8 +301,8 @@ func TestRuntimeBackendConformanceWorkspaceTempDirAllowsNonrootContainerWrite(t 
 	if err != nil {
 		t.Fatalf("workspace stat: %v", err)
 	}
-	if got := info.Mode().Perm(); got != 0o733 {
-		t.Fatalf("temp workspace mode: got %o want 733", got)
+	if got := info.Mode().Perm(); got != 0o703 {
+		t.Fatalf("temp workspace mode: got %o want 703", got)
 	}
 }
 

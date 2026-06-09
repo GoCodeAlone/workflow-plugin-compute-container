@@ -238,7 +238,7 @@ func runtimeBackendConformanceWorkspace(opts RuntimeBackendProbeOptions) (string
 			return "", func() {}, fmt.Errorf("runtime conformance workspace %q is not a directory", workspace)
 		}
 		originalMode := info.Mode()
-		if err := os.Chmod(workspace, originalMode|0o033); err != nil {
+		if err := os.Chmod(workspace, originalMode|0o003); err != nil {
 			return "", func() {}, err
 		}
 		return workspace, func() { _ = os.Chmod(workspace, originalMode) }, nil
@@ -247,7 +247,7 @@ func runtimeBackendConformanceWorkspace(opts RuntimeBackendProbeOptions) (string
 	if err != nil {
 		return "", func() {}, err
 	}
-	if err := os.Chmod(dir, 0o733); err != nil {
+	if err := os.Chmod(dir, 0o703); err != nil {
 		_ = os.RemoveAll(dir)
 		return "", func() {}, err
 	}
