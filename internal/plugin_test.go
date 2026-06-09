@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -33,12 +34,28 @@ func TestPluginJSONReferencesRuntimeAdapters(t *testing.T) {
 	}
 	var manifest struct {
 		RuntimeAdaptersRef string `json:"runtimeAdaptersRef"`
+		Dependencies       []struct {
+			Name       string `json:"name"`
+			Constraint string `json:"constraint"`
+		} `json:"dependencies"`
 	}
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		t.Fatal(err)
 	}
 	if manifest.RuntimeAdaptersRef != "runtime-adapters.json" {
 		t.Fatalf("runtimeAdaptersRef = %q", manifest.RuntimeAdaptersRef)
+	}
+	var coreDependencyFound bool
+	for _, dependency := range manifest.Dependencies {
+		if dependency.Name == "workflow-plugin-compute-core" {
+			coreDependencyFound = true
+			if dependency.Constraint != ">=0.5.0" {
+				t.Fatalf("compute-core dependency constraint = %q", dependency.Constraint)
+			}
+		}
+	}
+	if !coreDependencyFound {
+		t.Fatal("compute-core dependency not found")
 	}
 	adapters, err := os.ReadFile(filepath.Join(root, manifest.RuntimeAdaptersRef))
 	if err != nil {
@@ -54,6 +71,29 @@ func TestPluginJSONReferencesRuntimeAdapters(t *testing.T) {
 	if len(catalog.Adapters) != 2 {
 		t.Fatalf("runtime adapter catalog incomplete: %+v", catalog)
 	}
+	if len(catalog.RuntimeBackends) != 3 {
+		t.Fatalf("runtime backend catalog incomplete: %+v", catalog)
+	}
+	wantBackends := map[string]core.ContainerRuntimeTool{
+		"podman-rootless":    core.ContainerRuntimePodman,
+		"docker-desktop":     core.ContainerRuntimeDocker,
+		"nerdctl-containerd": core.ContainerRuntimeNerdctl,
+	}
+	for _, backend := range catalog.RuntimeBackends {
+		wantTool, ok := wantBackends[backend.BackendID]
+		if !ok {
+			t.Fatalf("unexpected runtime backend catalog entry: %+v", backend)
+		}
+		if !slices.Contains(backend.Tools, wantTool) ||
+			!slices.Contains(backend.ExecutorProviders, container.SandboxedCommandProviderName) ||
+			!slices.Contains(backend.ExecutorProviders, container.SandboxedContainerBuildProviderName) {
+			t.Fatalf("runtime backend catalog missing expected entries: %+v", backend)
+		}
+		delete(wantBackends, backend.BackendID)
+	}
+	if len(wantBackends) != 0 {
+		t.Fatalf("runtime backend catalog missing entries: %+v", wantBackends)
+	}
 	for _, adapter := range catalog.Adapters {
 		contract := adapter.Contract(core.RuntimeDescriptor{
 			Name:                  adapter.AdapterID,
@@ -67,4 +107,33 @@ func TestPluginJSONReferencesRuntimeAdapters(t *testing.T) {
 			t.Fatalf("runtime adapter contract for %s invalid: %v", adapter.AdapterID, err)
 		}
 	}
+}
+
+func TestPluginContractsAdvertiseRuntimeBackendReports(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "plugin.contracts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var contracts struct {
+		ProtocolTypes []struct {
+			Name            string   `json:"name"`
+			Wire            string   `json:"wire"`
+			GoType          string   `json:"goType"`
+			ProtocolVersion string   `json:"protocolVersion"`
+			ProducedBy      []string `json:"producedBy"`
+		} `json:"protocolTypes"`
+	}
+	if err := json.Unmarshal(data, &contracts); err != nil {
+		t.Fatal(err)
+	}
+	for _, typ := range contracts.ProtocolTypes {
+		if typ.Name == "RuntimeBackendReport" &&
+			typ.Wire == "json" &&
+			typ.GoType == "github.com/GoCodeAlone/workflow-plugin-compute-core/protocol.RuntimeBackendReport" &&
+			typ.ProtocolVersion == core.Version &&
+			slices.Contains(typ.ProducedBy, "DockerCompatibleRuntimeProbes") {
+			return
+		}
+	}
+	t.Fatalf("RuntimeBackendReport protocol type not advertised: %+v", contracts.ProtocolTypes)
 }

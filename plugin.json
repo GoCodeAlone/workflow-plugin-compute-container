@@ -19,7 +19,7 @@
   "dependencies": [
     {
       "name": "workflow-plugin-compute-core",
-      "constraint": ">=0.3.1"
+      "constraint": ">=0.5.0"
     }
   ],
   "capabilities": {

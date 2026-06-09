@@ -21,6 +21,38 @@
       "conformance_profiles": ["container-build-v1"]
     }
   ],
+  "runtime_backends": [
+    {
+      "backend_id": "podman-rootless",
+      "families": ["podman"],
+      "tools": ["podman"],
+      "isolation_modes": ["user-namespace"],
+      "install_burdens": ["system-installed"],
+      "runtime_profiles": ["sandboxed-oci-v1", "container-build-v1"],
+      "executor_providers": ["sandboxed-command", "sandboxed-container-build"],
+      "conformance_profiles": ["distroless-static-v1"]
+    },
+    {
+      "backend_id": "docker-desktop",
+      "families": ["docker"],
+      "tools": ["docker"],
+      "isolation_modes": ["vm-backed-container"],
+      "install_burdens": ["desktop-managed"],
+      "runtime_profiles": ["sandboxed-oci-v1", "container-build-v1"],
+      "executor_providers": ["sandboxed-command", "sandboxed-container-build"],
+      "conformance_profiles": ["distroless-static-v1"]
+    },
+    {
+      "backend_id": "nerdctl-containerd",
+      "families": ["nerdctl", "containerd"],
+      "tools": ["nerdctl"],
+      "isolation_modes": ["shared-kernel-container"],
+      "install_burdens": ["system-installed"],
+      "runtime_profiles": ["sandboxed-oci-v1", "container-build-v1"],
+      "executor_providers": ["sandboxed-command", "sandboxed-container-build"],
+      "conformance_profiles": ["distroless-static-v1"]
+    }
+  ],
   "host_owned_responsibilities": [
     "task-admission",
     "leases",
