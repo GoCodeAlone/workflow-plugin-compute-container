@@ -246,8 +246,35 @@ func TestRuntimeBackendConformanceWorkspaceNormalizesConfiguredPath(t *testing.T
 	if !info.IsDir() {
 		t.Fatalf("workspace is not a directory: %s", workspace)
 	}
-	if got := info.Mode().Perm(); got&0o002 == 0 {
-		t.Fatalf("workspace must be writable by nonroot probe containers, mode=%o", got)
+	if got := info.Mode().Perm(); got&0o033 != 0o033 {
+		t.Fatalf("workspace must be writable/traversable by nonroot probe containers, mode=%o", got)
+	}
+}
+
+func TestRuntimeBackendConformanceWorkspaceRestoresConfiguredPathMode(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "configured")
+	if err := os.Mkdir(workspace, 0o750); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+
+	_, cleanup, err := runtimeBackendConformanceWorkspace(RuntimeBackendProbeOptions{ConformanceWorkspace: workspace})
+	if err != nil {
+		t.Fatalf("conformance workspace: %v", err)
+	}
+	info, err := os.Stat(workspace)
+	if err != nil {
+		t.Fatalf("workspace stat during probe: %v", err)
+	}
+	if got := info.Mode().Perm(); got&0o033 != 0o033 {
+		t.Fatalf("configured workspace must be writable/traversable during probe, mode=%o", got)
+	}
+	cleanup()
+	info, err = os.Stat(workspace)
+	if err != nil {
+		t.Fatalf("workspace stat after cleanup: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o750 {
+		t.Fatalf("configured workspace mode after cleanup: got %o want 750", got)
 	}
 }
 
@@ -274,8 +301,8 @@ func TestRuntimeBackendConformanceWorkspaceTempDirAllowsNonrootContainerWrite(t 
 	if err != nil {
 		t.Fatalf("workspace stat: %v", err)
 	}
-	if got := info.Mode().Perm(); got&0o002 == 0 {
-		t.Fatalf("temp workspace must be writable by nonroot probe containers, mode=%o", got)
+	if got := info.Mode().Perm(); got != 0o733 {
+		t.Fatalf("temp workspace mode: got %o want 733", got)
 	}
 }
 

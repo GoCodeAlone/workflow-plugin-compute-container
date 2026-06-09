@@ -230,9 +230,6 @@ func runtimeBackendConformanceWorkspace(opts RuntimeBackendProbeOptions) (string
 		if err := os.MkdirAll(workspace, 0o700); err != nil {
 			return "", func() {}, err
 		}
-		if err := os.Chmod(workspace, 0o777); err != nil {
-			return "", func() {}, err
-		}
 		info, err := os.Stat(workspace)
 		if err != nil {
 			return "", func() {}, err
@@ -240,13 +237,17 @@ func runtimeBackendConformanceWorkspace(opts RuntimeBackendProbeOptions) (string
 		if !info.IsDir() {
 			return "", func() {}, fmt.Errorf("runtime conformance workspace %q is not a directory", workspace)
 		}
-		return workspace, func() {}, nil
+		originalMode := info.Mode()
+		if err := os.Chmod(workspace, originalMode|0o033); err != nil {
+			return "", func() {}, err
+		}
+		return workspace, func() { _ = os.Chmod(workspace, originalMode) }, nil
 	}
 	dir, err := os.MkdirTemp("", "wfcompute-runtime-probe-*")
 	if err != nil {
 		return "", func() {}, err
 	}
-	if err := os.Chmod(dir, 0o777); err != nil {
+	if err := os.Chmod(dir, 0o733); err != nil {
 		_ = os.RemoveAll(dir)
 		return "", func() {}, err
 	}
