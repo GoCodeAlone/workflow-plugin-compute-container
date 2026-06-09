@@ -1,6 +1,7 @@
 package container
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -164,22 +165,21 @@ func (p RuntimeBackendProbe) Probe(ctx context.Context) core.RuntimeBackendRepor
 	report.Version = sanitizeRuntimeVersion(string(versionResult.Stdout))
 	conformanceArgs := []string{"run", "--rm", "--network", SandboxNetworkNone, opts.ConformanceImage}
 	conformanceArgs = append(conformanceArgs, opts.ConformanceCommand...)
-	if _, err := runner.Run(ctx, opts.Command, conformanceArgs...); err != nil {
+	conformanceResult, err := runner.Run(ctx, opts.Command, conformanceArgs...)
+	if err != nil {
 		report.Status = core.RuntimeBackendDegraded
 		report.Reason = redactRuntimeProbeDetail(fmt.Sprintf("runtime conformance probe failed: %v", err))
 		return report
 	}
+	evidence, err := runtimeBackendConformanceEvidence(conformanceResult.Stdout, report)
+	if err != nil {
+		report.Status = core.RuntimeBackendDegraded
+		report.Reason = redactRuntimeProbeDetail(fmt.Sprintf("runtime conformance evidence incomplete: %v", err))
+		return report
+	}
 	report.Status = core.RuntimeBackendSupported
 	report.ExecutorProviders, report.Executors = executorClaimsForRuntimeProfiles(opts.RuntimeProfiles, report.Version)
-	report.Evidence = core.RuntimeBackendEvidence{
-		Digest:    runtimeBackendEvidenceDigest(report),
-		Workspace: true,
-		Network:   true,
-		Env:       true,
-		Proof:     true,
-		Cleanup:   true,
-		Details:   []string{firstNonEmpty(opts.ConformanceProfiles...)},
-	}
+	report.Evidence = evidence
 	return report
 }
 
@@ -252,6 +252,39 @@ func runtimeBackendEvidenceDigest(report core.RuntimeBackendReport) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
+func runtimeBackendConformanceEvidence(stdout []byte, report core.RuntimeBackendReport) (core.RuntimeBackendEvidence, error) {
+	var evidence core.RuntimeBackendEvidence
+	if err := json.Unmarshal(bytes.TrimSpace(stdout), &evidence); err != nil {
+		return core.RuntimeBackendEvidence{}, fmt.Errorf("decode evidence JSON: %w", err)
+	}
+	var missing []string
+	if !evidence.Workspace {
+		missing = append(missing, "workspace")
+	}
+	if !evidence.Network {
+		missing = append(missing, "network")
+	}
+	if !evidence.Env {
+		missing = append(missing, "env")
+	}
+	if !evidence.Proof {
+		missing = append(missing, "proof")
+	}
+	if !evidence.Cleanup {
+		missing = append(missing, "cleanup")
+	}
+	if len(missing) != 0 {
+		return core.RuntimeBackendEvidence{}, fmt.Errorf("missing %s", strings.Join(missing, ","))
+	}
+	if evidence.Digest == "" {
+		evidence.Digest = runtimeBackendEvidenceDigest(report)
+	}
+	if len(evidence.Details) == 0 {
+		evidence.Details = []string{firstNonEmpty(report.ConformanceProfiles...)}
+	}
+	return evidence, nil
+}
+
 func digestForRuntimeClaim(parts ...string) string {
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return "sha256:" + hex.EncodeToString(sum[:])
@@ -282,6 +315,9 @@ func redactRuntimeProbeDetail(value string) string {
 		"secret",
 		"password",
 		"credential",
+		"auth",
+		"authentication",
+		"unauthorized",
 		"authorization",
 		"bearer",
 	} {

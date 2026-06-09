@@ -102,8 +102,10 @@ func TestDockerCompatibleRuntimeProbeReportsSupportedProfiles(t *testing.T) {
 		Runner: &fakeRuntimeCommandRunner{
 			path: "/usr/bin/podman",
 			results: map[string]fakeRuntimeCommandResult{
-				"podman version --format {{.Client.Version}}":                                                    {stdout: "5.0.0\n"},
-				"podman run --rm --network none " + defaultConformanceImageRef + " " + defaultConformanceCommand: {},
+				"podman version --format {{.Client.Version}}": {stdout: "5.0.0\n"},
+				"podman run --rm --network none " + defaultConformanceImageRef + " " + defaultConformanceCommand: {
+					stdout: validRuntimeEvidenceJSON(),
+				},
 			},
 		},
 	}
@@ -135,14 +137,40 @@ func TestDockerCompatibleRuntimeProbeReportsSupportedProfiles(t *testing.T) {
 	}
 }
 
+func TestDockerCompatibleRuntimeProbeRequiresFullEvidencePayload(t *testing.T) {
+	probe := RuntimeBackendProbe{
+		Options: podmanProbeOptions([]core.RuntimeProfile{core.RuntimeProfileSandboxedOCI}),
+		Runner: &fakeRuntimeCommandRunner{
+			path: "/usr/bin/podman",
+			results: map[string]fakeRuntimeCommandResult{
+				"podman version --format {{.Client.Version}}": {stdout: "5.0.0\n"},
+				"podman run --rm --network none " + defaultConformanceImageRef + " " + defaultConformanceCommand: {
+					stdout: `{"workspace":true,"network":true,"env":true,"proof":true}`,
+				},
+			},
+		},
+	}
+
+	report := probe.Probe(context.Background())
+
+	if report.Status != core.RuntimeBackendDegraded {
+		t.Fatalf("status = %q, want degraded for incomplete evidence: %+v", report.Status, report)
+	}
+	if len(report.ExecutorProviders) != 0 || len(report.Executors) != 0 {
+		t.Fatalf("incomplete evidence advertised executors: %+v", report)
+	}
+}
+
 func TestDockerCompatibleRuntimeProbeOnlyAdvertisesRequestedProfiles(t *testing.T) {
 	probe := RuntimeBackendProbe{
 		Options: podmanProbeOptions([]core.RuntimeProfile{core.RuntimeProfileSandboxedOCI}),
 		Runner: &fakeRuntimeCommandRunner{
 			path: "/usr/bin/podman",
 			results: map[string]fakeRuntimeCommandResult{
-				"podman version --format {{.Client.Version}}":                                                    {stdout: "5.0.0\n"},
-				"podman run --rm --network none " + defaultConformanceImageRef + " " + defaultConformanceCommand: {},
+				"podman version --format {{.Client.Version}}": {stdout: "5.0.0\n"},
+				"podman run --rm --network none " + defaultConformanceImageRef + " " + defaultConformanceCommand: {
+					stdout: validRuntimeEvidenceJSON(),
+				},
 			},
 		},
 	}
@@ -193,6 +221,29 @@ func podmanProbeOptions(profiles []core.RuntimeProfile) RuntimeBackendProbeOptio
 		RuntimeProfiles:     profiles,
 		ConformanceProfiles: []string{"distroless-static-v1"},
 		GeneratedAt:         time.Unix(1_700_000_000, 0).UTC(),
+	}
+}
+
+func validRuntimeEvidenceJSON() string {
+	return `{"workspace":true,"network":true,"env":true,"proof":true,"cleanup":true}`
+}
+
+func TestRuntimeProbeRedactsAuthFailures(t *testing.T) {
+	report := RuntimeBackendProbe{
+		Options: podmanProbeOptions([]core.RuntimeProfile{core.RuntimeProfileSandboxedOCI}),
+		Runner: &fakeRuntimeCommandRunner{
+			path: "/usr/bin/podman",
+			results: map[string]fakeRuntimeCommandResult{
+				"podman version --format {{.Client.Version}}": {err: errors.New("authentication required")},
+			},
+		},
+	}.Probe(context.Background())
+
+	if strings.Contains(strings.ToLower(report.Reason), "auth") {
+		t.Fatalf("auth detail not redacted: %q", report.Reason)
+	}
+	if err := report.Validate(); err != nil {
+		t.Fatalf("redacted auth failure report invalid: %v", err)
 	}
 }
 

@@ -194,6 +194,36 @@ func TestDockerCompatibleRuntimeRequiresExplicitWritableRootFS(t *testing.T) {
 	}
 }
 
+func TestDockerCompatibleRuntimeRejectsDisallowedCapabilitiesAndTmpfs(t *testing.T) {
+	_, cleanup, err := (DockerSandboxRuntime{}).prepareRun(SandboxRunRequest{
+		Image:           "ghcr.io/gocodealone/container-builder:latest",
+		Command:         []string{"/usr/local/bin/wfcompute-container-builder"},
+		Workspace:       t.TempDir(),
+		RunAsRoot:       true,
+		AddCapabilities: []string{"SYS_ADMIN"},
+	})
+	if cleanup != nil {
+		cleanup()
+	}
+	if err == nil || !strings.Contains(err.Error(), "capability") {
+		t.Fatalf("expected disallowed capability rejection, got %v", err)
+	}
+
+	_, cleanup, err = (DockerSandboxRuntime{}).prepareRun(SandboxRunRequest{
+		Image:      "ghcr.io/gocodealone/container-builder:latest",
+		Command:    []string{"/usr/local/bin/wfcompute-container-builder"},
+		Workspace:  t.TempDir(),
+		RunAsRoot:  true,
+		ExtraTmpfs: []string{"/var/run:rw,size=1g"},
+	})
+	if cleanup != nil {
+		cleanup()
+	}
+	if err == nil || !strings.Contains(err.Error(), "tmpfs") {
+		t.Fatalf("expected disallowed tmpfs rejection, got %v", err)
+	}
+}
+
 func TestDockerCompatibleRuntimeDoesNotLeakEnvValuesInArgsAndCleansEnvFile(t *testing.T) {
 	value := "runtime-sensitive-value"
 	spec, cleanup, err := (DockerSandboxRuntime{}).prepareRun(SandboxRunRequest{
@@ -224,6 +254,39 @@ func TestDockerCompatibleRuntimeDoesNotLeakEnvValuesInArgsAndCleansEnvFile(t *te
 	cleanup()
 	if _, err := os.Stat(spec.EnvFile); !os.IsNotExist(err) {
 		t.Fatalf("env file residual after cleanup: %v", err)
+	}
+}
+
+func TestDockerCompatibleRuntimeHonorsWorkingDirInsideWorkspace(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.Mkdir(filepath.Join(workspace, "work"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	spec, cleanup, err := (DockerSandboxRuntime{}).prepareRun(SandboxRunRequest{
+		Image:      "ghcr.io/gocodealone/workload:latest",
+		Command:    []string{"pwd"},
+		Workspace:  workspace,
+		WorkingDir: "work",
+	})
+	if err != nil {
+		t.Fatalf("prepare run: %v", err)
+	}
+	defer cleanup()
+	if !strings.Contains(strings.Join(spec.Args, "\x00"), "-w\x00/workspace/work") {
+		t.Fatalf("working dir not applied: %+v", spec.Args)
+	}
+
+	_, cleanup, err = (DockerSandboxRuntime{}).prepareRun(SandboxRunRequest{
+		Image:      "ghcr.io/gocodealone/workload:latest",
+		Command:    []string{"pwd"},
+		Workspace:  workspace,
+		WorkingDir: "../outside",
+	})
+	if cleanup != nil {
+		cleanup()
+	}
+	if err == nil || !strings.Contains(err.Error(), "working_dir") {
+		t.Fatalf("expected working dir escape rejection, got %v", err)
 	}
 }
 
@@ -262,5 +325,20 @@ func TestNerdctlSandboxRuntimePrefixesScopedRuntimeArgs(t *testing.T) {
 	}
 	if got := strings.Join(spec.CommandArgs(), " "); !strings.HasPrefix(got, strings.Join(scope.Args, " ")+" run ") {
 		t.Fatalf("scoped runtime args not prefixed: %q", got)
+	}
+}
+
+func TestDockerCompatibleRuntimeRejectsUnsafeRuntimeScopeArgs(t *testing.T) {
+	_, cleanup, err := (DockerSandboxRuntime{Tool: "nerdctl"}).prepareRun(SandboxRunRequest{
+		Image:        "localhost/private-provider:v1",
+		Command:      []string{"run"},
+		RuntimeScope: ContainerRuntimeScope{Args: []string{"--address", "/var/run/containerd/containerd.sock"}},
+		Workspace:    t.TempDir(),
+	})
+	if cleanup != nil {
+		cleanup()
+	}
+	if err == nil || !strings.Contains(err.Error(), "runtime scope") {
+		t.Fatalf("expected unsafe runtime scope rejection, got %v", err)
 	}
 }

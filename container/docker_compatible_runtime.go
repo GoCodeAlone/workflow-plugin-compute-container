@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -96,14 +98,14 @@ func (r DockerSandboxRuntime) prepareRun(req SandboxRunRequest) (dockerRunSpec, 
 		args = append(args, "--read-only")
 	}
 	for _, capability := range req.AddCapabilities {
-		if err := validateDockerCapability(capability); err != nil {
+		if err := validateDockerCapability(req, capability); err != nil {
 			cleanup()
 			return dockerRunSpec{}, cleanup, err
 		}
 		args = append(args, "--cap-add", capability)
 	}
 	for _, tmpfs := range req.ExtraTmpfs {
-		if err := validateDockerTmpfs(tmpfs); err != nil {
+		if err := validateDockerTmpfs(req, tmpfs); err != nil {
 			cleanup()
 			return dockerRunSpec{}, cleanup, err
 		}
@@ -124,7 +126,12 @@ func (r DockerSandboxRuntime) prepareRun(req SandboxRunRequest) (dockerRunSpec, 
 	if req.Limits.CPUPercent > 0 {
 		args = append(args, "--cpus", fmt.Sprintf("%.2f", float64(req.Limits.CPUPercent)/100))
 	}
-	args = append(args, "-v", workspace+":/workspace:rw", "-w", "/workspace")
+	workingDir, err := sandboxWorkingDir(req.WorkingDir)
+	if err != nil {
+		cleanup()
+		return dockerRunSpec{}, cleanup, err
+	}
+	args = append(args, "-v", workspace+":/workspace:rw", "-w", workingDir)
 	for _, mount := range req.DataMounts {
 		hostPath, containerPath, err := validateSandboxMount(mount)
 		if err != nil {
@@ -148,7 +155,12 @@ func (r DockerSandboxRuntime) prepareRun(req SandboxRunRequest) (dockerRunSpec, 
 	}
 	args = append(args, req.Image)
 	args = append(args, req.Command...)
-	return dockerRunSpec{Tool: tool, RuntimeArgs: cloneContainerRuntimeScope(req.RuntimeScope).Args, Args: args, EnvFile: envFile}, cleanup, nil
+	runtimeScope, err := validateRuntimeScope(tool, req.RuntimeScope)
+	if err != nil {
+		cleanup()
+		return dockerRunSpec{}, cleanup, err
+	}
+	return dockerRunSpec{Tool: tool, RuntimeArgs: runtimeScope.Args, Args: args, EnvFile: envFile}, cleanup, nil
 }
 
 func (s dockerRunSpec) CommandArgs() []string {
@@ -242,7 +254,7 @@ func joinCleanup(first func(), second func()) func() {
 	}
 }
 
-func validateDockerCapability(value string) error {
+func validateDockerCapability(req SandboxRunRequest, value string) error {
 	if value == "" {
 		return errors.New("docker capability cannot be empty")
 	}
@@ -251,12 +263,19 @@ func validateDockerCapability(value string) error {
 			return fmt.Errorf("invalid docker capability %q", value)
 		}
 	}
+	if !req.RunAsRoot || !slices.Contains([]string{"CHOWN", "FOWNER"}, value) {
+		return fmt.Errorf("docker capability %q is not allowed for this sandbox profile", value)
+	}
 	return nil
 }
 
-func validateDockerTmpfs(value string) error {
+func validateDockerTmpfs(req SandboxRunRequest, value string) error {
 	if value == "" || !strings.HasPrefix(value, "/") || strings.ContainsAny(value, "\x00\n\r") {
 		return fmt.Errorf("invalid docker tmpfs %q", value)
+	}
+	allowed := []string{"/wfcompute-build:rw,noexec,nosuid,nodev,size=512m"}
+	if !req.RunAsRoot || !slices.Contains(allowed, value) {
+		return fmt.Errorf("docker tmpfs %q is not allowed for this sandbox profile", value)
 	}
 	return nil
 }
@@ -364,6 +383,41 @@ func cloneContainerRuntimeScope(scope ContainerRuntimeScope) ContainerRuntimeSco
 func appendRuntimeScopeArgs(scope ContainerRuntimeScope, args ...string) []string {
 	out := append([]string(nil), scope.Args...)
 	return append(out, args...)
+}
+
+func validateRuntimeScope(tool string, scope ContainerRuntimeScope) (ContainerRuntimeScope, error) {
+	if len(scope.Args) == 0 {
+		return ContainerRuntimeScope{}, nil
+	}
+	if tool != "nerdctl" {
+		return ContainerRuntimeScope{}, errors.New("runtime scope args are only supported for nerdctl")
+	}
+	if len(scope.Args) != 2 || scope.Args[0] != "--namespace" || strings.TrimSpace(scope.Args[1]) == "" {
+		return ContainerRuntimeScope{}, errors.New("runtime scope must be --namespace <name>")
+	}
+	namespace := scope.Args[1]
+	if strings.ContainsAny(namespace, " \t\r\n/:?&#\\\x00") || strings.HasPrefix(namespace, "-") {
+		return ContainerRuntimeScope{}, errors.New("runtime scope namespace is invalid")
+	}
+	return cloneContainerRuntimeScope(scope), nil
+}
+
+func sandboxWorkingDir(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "." {
+		return "/workspace", nil
+	}
+	if filepath.IsAbs(value) || strings.ContainsAny(value, "\x00\r\n") {
+		return "", errors.New("working_dir is invalid")
+	}
+	cleaned := filepath.Clean(value)
+	if cleaned == "." || cleaned == "" {
+		return "/workspace", nil
+	}
+	if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+		return "", errors.New("working_dir escapes workspace")
+	}
+	return path.Join("/workspace", filepath.ToSlash(cleaned)), nil
 }
 
 func combinedOutputContext(ctx context.Context, name string, args ...string) ([]byte, error) {
