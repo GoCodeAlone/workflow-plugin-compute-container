@@ -7,7 +7,14 @@
       "wire": "json",
       "goType": "github.com/GoCodeAlone/workflow-plugin-compute-core/protocol.RuntimeBackendReport",
       "protocolVersion": "compute.v1alpha1",
-      "producedBy": ["DockerCompatibleRuntimeProbes"]
+      "producedBy": ["DockerCompatibleRuntimeProbes", "ManagedContainerdRuntimeProbe"]
+    },
+    {
+      "name": "ManagedRuntimeBundleCatalog",
+      "wire": "json",
+      "goType": "github.com/GoCodeAlone/workflow-plugin-compute-container/container.ManagedRuntimeBundleCatalog",
+      "protocolVersion": "compute.v1alpha1",
+      "producedBy": ["managed-runtime-bundles.json"]
     }
   ]
 }

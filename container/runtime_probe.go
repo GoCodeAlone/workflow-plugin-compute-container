@@ -63,16 +63,40 @@ type RuntimeBackendProbeOptions struct {
 	ConformanceImage     string
 	ConformanceCommand   []string
 	ConformanceWorkspace string
+	RuntimeScopeArgs     []string
 	IsolationMode        core.RuntimeIsolationMode
 	InstallBurden        core.RuntimeInstallBurden
 	RuntimeProfiles      []core.RuntimeProfile
 	ConformanceProfiles  []string
+	ManagedBundle        *core.ManagedRuntimeBundleDescriptor
 	GeneratedAt          time.Time
 }
 
 type RuntimeBackendProbe struct {
 	Options RuntimeBackendProbeOptions
 	Runner  RuntimeCommandRunner
+}
+
+type ManagedRuntimeInstallation struct {
+	Bundle      core.ManagedRuntimeBundleDescriptor
+	Root        string
+	CommandPath string
+}
+
+func NewManagedContainerdRuntimeInstallation(bundle core.ManagedRuntimeBundleDescriptor, root string) (ManagedRuntimeInstallation, error) {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return ManagedRuntimeInstallation{}, errors.New("managed runtime root is required")
+	}
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return ManagedRuntimeInstallation{}, err
+	}
+	return ManagedRuntimeInstallation{
+		Bundle:      bundle,
+		Root:        root,
+		CommandPath: filepath.Join(root, "bin", "nerdctl"),
+	}, nil
 }
 
 func DockerCompatibleRuntimeProbes(runner RuntimeCommandRunner, generatedAt time.Time) []RuntimeBackendProbe {
@@ -135,6 +159,77 @@ func DockerCompatibleRuntimeProbes(runner RuntimeCommandRunner, generatedAt time
 	}
 }
 
+func ManagedContainerdRuntimeProbe(installation *ManagedRuntimeInstallation, runner RuntimeCommandRunner, generatedAt time.Time) RuntimeBackendProbe {
+	if runner == nil {
+		runner = ExecRuntimeCommandRunner{}
+	}
+	profiles := []core.RuntimeProfile{core.RuntimeProfileSandboxedOCI, core.RuntimeProfileContainerBuild}
+	backendID := "managed-containerd"
+	command := ""
+	var bundle *core.ManagedRuntimeBundleDescriptor
+	if installation != nil {
+		bundle = &installation.Bundle
+		command = installation.CommandPath
+	}
+	if bundle != nil && bundle.BundleID != "" {
+		backendID = bundle.BundleID
+	}
+	profile := defaultConformanceProfile
+	if bundle != nil && bundle.ConformanceProfile != "" {
+		profile = bundle.ConformanceProfile
+	}
+	return RuntimeBackendProbe{
+		Options: RuntimeBackendProbeOptions{
+			BackendID:           backendID,
+			Family:              core.RuntimeBackendFamilyContainerd,
+			Tool:                core.ContainerRuntimeNerdctl,
+			Command:             command,
+			VersionArgs:         []string{"version", "--format", "{{.Client.Version}}"},
+			ConformanceImage:    defaultRuntimeConformanceImage(),
+			ConformanceCommand:  []string{defaultConformanceCommand},
+			RuntimeScopeArgs:    ManagedRuntimeScopeArgs(backendID, profile),
+			IsolationMode:       core.RuntimeIsolationUserNamespace,
+			InstallBurden:       core.RuntimeInstallBundled,
+			RuntimeProfiles:     profiles,
+			ConformanceProfiles: []string{profile},
+			ManagedBundle:       bundle,
+			GeneratedAt:         generatedAt,
+		},
+		Runner: runner,
+	}
+}
+
+func ManagedContainerdRuntimeProbes(catalog ManagedRuntimeBundleCatalog, installRoot string, runner RuntimeCommandRunner, generatedAt time.Time) []RuntimeBackendProbe {
+	if strings.TrimSpace(installRoot) == "" {
+		return nil
+	}
+	if generatedAt.IsZero() {
+		generatedAt = time.Now().UTC()
+	}
+	probes := make([]RuntimeBackendProbe, 0, len(catalog.Bundles))
+	for _, candidate := range catalog.Bundles {
+		bundle, err := catalog.BundleForTarget(candidate.BundleID, runtime.GOOS, runtime.GOARCH, generatedAt)
+		if err != nil {
+			continue
+		}
+		installation, err := NewManagedContainerdRuntimeInstallation(bundle, filepath.Join(installRoot, bundle.BundleID))
+		if err != nil {
+			continue
+		}
+		probes = append(probes, ManagedContainerdRuntimeProbe(&installation, runner, generatedAt))
+	}
+	return probes
+}
+
+func ManagedRuntimeScopeArgs(parts ...string) []string {
+	return []string{"--namespace", ManagedRuntimeScopeName(parts...)}
+}
+
+func ManagedRuntimeScopeName(parts ...string) string {
+	digest := digestForRuntimeClaim(append(parts, "scope")...)
+	return "wfcompute-" + digest[7:23]
+}
+
 func (p RuntimeBackendProbe) Probe(ctx context.Context) core.RuntimeBackendReport {
 	opts := p.Options.withDefaults()
 	runner := p.Runner
@@ -155,6 +250,35 @@ func (p RuntimeBackendProbe) Probe(ctx context.Context) core.RuntimeBackendRepor
 		ConformanceProfiles: slices.Clone(opts.ConformanceProfiles),
 		GeneratedAt:         opts.GeneratedAt,
 	}
+	if opts.InstallBurden == core.RuntimeInstallBundled {
+		if opts.ManagedBundle == nil {
+			report.Reason = "managed runtime bundle is unavailable"
+			return report
+		}
+		if !filepath.IsAbs(opts.Command) {
+			report.Reason = "managed runtime executable is unavailable"
+			return report
+		}
+		if err := opts.ManagedBundle.ValidateAt(opts.GeneratedAt); err != nil {
+			report.Status = core.RuntimeBackendDegraded
+			report.Reason = redactRuntimeProbeDetail(fmt.Sprintf("managed runtime bundle validation failed: %v", err))
+			return report
+		}
+		report.Bundle = opts.ManagedBundle
+		report.Version = opts.ManagedBundle.Version
+		if opts.ManagedBundle.Family != "" {
+			report.Family = opts.ManagedBundle.Family
+		}
+		if opts.ManagedBundle.Tool != "" {
+			report.Tool = opts.ManagedBundle.Tool
+		}
+		if opts.ManagedBundle.OS != "" {
+			report.OS = opts.ManagedBundle.OS
+		}
+		if opts.ManagedBundle.Arch != "" {
+			report.Arch = opts.ManagedBundle.Arch
+		}
+	}
 	if _, err := runner.LookPath(opts.Command); err != nil {
 		report.Reason = "runtime executable is unavailable"
 		return report
@@ -165,7 +289,9 @@ func (p RuntimeBackendProbe) Probe(ctx context.Context) core.RuntimeBackendRepor
 		report.Reason = redactRuntimeProbeDetail(fmt.Sprintf("runtime version probe failed: %v", err))
 		return report
 	}
-	report.Version = sanitizeRuntimeVersion(string(versionResult.Stdout))
+	if report.Version == "" {
+		report.Version = sanitizeRuntimeVersion(string(versionResult.Stdout))
+	}
 	workspace, cleanup, err := runtimeBackendConformanceWorkspace(opts)
 	if err != nil {
 		report.Status = core.RuntimeBackendDegraded
@@ -173,16 +299,17 @@ func (p RuntimeBackendProbe) Probe(ctx context.Context) core.RuntimeBackendRepor
 		return report
 	}
 	defer cleanup()
-	conformanceArgs := []string{
+	conformanceArgs := append([]string(nil), opts.RuntimeScopeArgs...)
+	conformanceArgs = append(conformanceArgs,
 		"run",
 		"--rm",
 		"--network", SandboxNetworkNone,
-		"-v", workspace + ":/workspace",
+		"-v", workspace+":/workspace",
 		"-w", "/workspace",
 		"-e", "WFCOMPUTE_RUNTIME_PROBE=1",
 		"--read-only",
 		opts.ConformanceImage,
-	}
+	)
 	conformanceArgs = append(conformanceArgs, opts.ConformanceCommand...)
 	conformanceResult, err := runner.Run(ctx, opts.Command, conformanceArgs...)
 	if err != nil {
@@ -333,6 +460,12 @@ func runtimeBackendConformanceEvidence(stdout []byte, report core.RuntimeBackend
 	}
 	if len(evidence.Details) == 0 {
 		evidence.Details = []string{firstNonEmpty(report.ConformanceProfiles...)}
+	}
+	if report.InstallBurden == core.RuntimeInstallBundled && report.Bundle != nil {
+		expectedScope := "runtime-scope:" + ManagedRuntimeScopeName(report.BackendID, firstNonEmpty(report.ConformanceProfiles...))
+		if !slices.Contains(evidence.Details, expectedScope) {
+			return core.RuntimeBackendEvidence{}, fmt.Errorf("missing managed runtime scope evidence")
+		}
 	}
 	return evidence, nil
 }

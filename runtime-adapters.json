@@ -51,6 +51,22 @@
       "runtime_profiles": ["sandboxed-oci-v1", "container-build-v1"],
       "executor_providers": ["sandboxed-command", "sandboxed-container-build"],
       "conformance_profiles": ["distroless-static-v1"]
+    },
+    {
+      "backend_id": "managed-containerd-linux-amd64",
+      "families": ["containerd"],
+      "tools": ["nerdctl"],
+      "supported_targets": [
+        {
+          "os": "linux",
+          "arch": "amd64"
+        }
+      ],
+      "isolation_modes": ["user-namespace"],
+      "install_burdens": ["bundled"],
+      "runtime_profiles": ["sandboxed-oci-v1", "container-build-v1"],
+      "executor_providers": ["sandboxed-command", "sandboxed-container-build"],
+      "conformance_profiles": ["distroless-static-v1"]
     }
   ],
   "host_owned_responsibilities": [

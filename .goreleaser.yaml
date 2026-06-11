@@ -3,6 +3,7 @@ version: 2
 before:
   hooks:
     - go mod tidy
+    - ./scripts/package-managed-runtime-bundle.sh
     - "sed -i.bak 's/\"version\": \".*\"/\"version\": \"{{ .Version }}\"/' plugin.json && rm -f plugin.json.bak"
 
 builds:
@@ -28,6 +29,8 @@ archives:
       - plugin.json
       - plugin.contracts.json
       - runtime-adapters.json
+      - managed-runtime-bundles.json
+      - .release/managed-runtime-bundles/*
       - LICENSE
 
 checksum:
