@@ -45,22 +45,23 @@ type SandboxMount struct {
 }
 
 type SandboxRunRequest struct {
-	Image           string
-	Command         []string
-	RuntimeScope    ContainerRuntimeScope
-	Stdin           []byte
-	Workspace       string
-	WorkingDir      string
-	Env             map[string]string
-	Network         string
-	RuntimeName     string
-	RunAsRoot       bool
-	WritableRootFS  bool
-	AddCapabilities []string
-	ExtraTmpfs      []string
-	DataMounts      []SandboxMount
-	Timeout         time.Duration
-	Limits          core.ResourceLimits
+	Image                      string
+	Command                    []string
+	CommandOverridesEntrypoint bool
+	RuntimeScope               ContainerRuntimeScope
+	Stdin                      []byte
+	Workspace                  string
+	WorkingDir                 string
+	Env                        map[string]string
+	Network                    string
+	RuntimeName                string
+	RunAsRoot                  bool
+	WritableRootFS             bool
+	AddCapabilities            []string
+	ExtraTmpfs                 []string
+	DataMounts                 []SandboxMount
+	Timeout                    time.Duration
+	Limits                     core.ResourceLimits
 }
 
 type SandboxRunResult struct {

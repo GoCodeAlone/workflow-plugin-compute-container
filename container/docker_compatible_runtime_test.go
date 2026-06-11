@@ -59,6 +59,73 @@ func TestDockerCompatibleRuntimeBuildsBreakoutResistantArgs(t *testing.T) {
 	}
 }
 
+func TestDockerCompatibleRuntimeClearsImageEntrypointForExplicitCommand(t *testing.T) {
+	image := "ghcr.io/gocodealone/workload-with-entrypoint@sha256:" + strings.Repeat("a", 64)
+	spec, cleanup, err := (DockerSandboxRuntime{}).prepareRun(SandboxRunRequest{
+		Image:                      image,
+		Command:                    []string{"/workspace/provider/dynamic-provider"},
+		CommandOverridesEntrypoint: true,
+		Workspace:                  t.TempDir(),
+		Network:                    SandboxNetworkBridge,
+	})
+	if err != nil {
+		t.Fatalf("prepare run: %v", err)
+	}
+	defer cleanup()
+	args := strings.Join(spec.Args, "\x00")
+	entrypointAt := strings.Index(args, "--entrypoint\x00\x00")
+	if entrypointAt < 0 {
+		t.Fatalf("docker args must clear image entrypoint for explicit command: %q", args)
+	}
+	imageAt := strings.Index(args, image)
+	if imageAt < 0 {
+		t.Fatalf("image arg missing: %q", args)
+	}
+	if entrypointAt > imageAt {
+		t.Fatalf("--entrypoint must appear before image arg: %q", args)
+	}
+	if !strings.Contains(args, image+"\x00/workspace/provider/dynamic-provider") {
+		t.Fatalf("explicit command must remain after image arg: %q", args)
+	}
+}
+
+func TestDockerCompatibleRuntimePreservesImageEntrypointForCommandArgsByDefault(t *testing.T) {
+	image := "ghcr.io/gocodealone/workload-with-entrypoint@sha256:" + strings.Repeat("a", 64)
+	spec, cleanup, err := (DockerSandboxRuntime{}).prepareRun(SandboxRunRequest{
+		Image:     image,
+		Command:   []string{"serve", "--port", "8080"},
+		Workspace: t.TempDir(),
+		Network:   SandboxNetworkBridge,
+	})
+	if err != nil {
+		t.Fatalf("prepare run: %v", err)
+	}
+	defer cleanup()
+	args := strings.Join(spec.Args, "\x00")
+	if strings.Contains(args, "--entrypoint\x00\x00") {
+		t.Fatalf("docker args must preserve image entrypoint unless command override is explicit: %q", args)
+	}
+	if !strings.Contains(args, image+"\x00serve\x00--port\x008080") {
+		t.Fatalf("command args must remain after image arg: %q", args)
+	}
+}
+
+func TestDockerCompatibleRuntimeRequiresCommandForEntrypointOverride(t *testing.T) {
+	for _, command := range [][]string{nil, []string{""}} {
+		_, cleanup, err := (DockerSandboxRuntime{}).prepareRun(SandboxRunRequest{
+			Image:                      "ghcr.io/gocodealone/workload-with-entrypoint:latest",
+			Command:                    command,
+			CommandOverridesEntrypoint: true,
+			Workspace:                  t.TempDir(),
+			Network:                    SandboxNetworkBridge,
+		})
+		cleanup()
+		if err == nil || !strings.Contains(err.Error(), "entrypoint override requires a command") {
+			t.Fatalf("entrypoint override accepted command %#v: %v", command, err)
+		}
+	}
+}
+
 func TestDockerCompatibleRuntimeUsesDefaultDenyNetwork(t *testing.T) {
 	spec, cleanup, err := (DockerSandboxRuntime{}).prepareRun(SandboxRunRequest{
 		Image:     "ghcr.io/gocodealone/workload:latest",
