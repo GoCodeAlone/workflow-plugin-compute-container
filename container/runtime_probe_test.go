@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -186,6 +187,140 @@ func TestDockerCompatibleRuntimeProbeOnlyAdvertisesRequestedProfiles(t *testing.
 	}
 }
 
+func TestManagedRuntimeBundleCatalogRejectsBlockedStaleOrUnsignedBundle(t *testing.T) {
+	catalog := validManagedRuntimeBundleCatalog()
+	catalog.BlockedVersions = []string{"v2.3.1"}
+	if _, err := catalog.Bundle("managed-containerd-linux-amd64", time.Unix(1_700_000_000, 0).UTC()); err == nil || !strings.Contains(err.Error(), "blocked") {
+		t.Fatalf("expected blocked bundle to fail, got %v", err)
+	}
+
+	catalog = validManagedRuntimeBundleCatalog()
+	catalog.Bundles[0].ValidUntil = time.Unix(1_600_000_000, 0).UTC()
+	if _, err := catalog.Bundle("managed-containerd-linux-amd64", time.Unix(1_700_000_000, 0).UTC()); err == nil || !strings.Contains(err.Error(), "valid_until") {
+		t.Fatalf("expected stale bundle to fail, got %v", err)
+	}
+
+	catalog = validManagedRuntimeBundleCatalog()
+	catalog.Bundles[0].SignatureDigest = ""
+	if _, err := catalog.Bundle("managed-containerd-linux-amd64", time.Unix(1_700_000_000, 0).UTC()); err == nil || !strings.Contains(err.Error(), "signature") {
+		t.Fatalf("expected unsigned bundle to fail, got %v", err)
+	}
+}
+
+func TestManagedRuntimeBundleCatalogRequiresMatchingTarget(t *testing.T) {
+	catalog := validManagedRuntimeBundleCatalog()
+
+	if _, err := catalog.BundleForTarget("managed-containerd-linux-amd64", "windows", "amd64", time.Unix(1_700_000_000, 0).UTC()); err == nil || !strings.Contains(err.Error(), "does not support") {
+		t.Fatalf("expected mismatched target to fail, got %v", err)
+	}
+	if _, err := catalog.BundleForTarget("managed-containerd-linux-amd64", "linux", "amd64", time.Unix(1_700_000_000, 0).UTC()); err != nil {
+		t.Fatalf("expected linux/amd64 bundle lookup to pass: %v", err)
+	}
+}
+
+func TestManagedContainerdRuntimeProbeRequiresBundleBeforeSupport(t *testing.T) {
+	probe := ManagedContainerdRuntimeProbe(nil, RuntimeCommandRunner(nil), time.Unix(1_700_000_000, 0).UTC())
+
+	report := probe.Probe(context.Background())
+
+	if report.Status != core.RuntimeBackendUnsupported {
+		t.Fatalf("status=%q want unsupported: %+v", report.Status, report)
+	}
+	if len(report.ExecutorProviders) != 0 || len(report.Executors) != 0 {
+		t.Fatalf("missing managed bundle advertised executors: %+v", report)
+	}
+	if err := report.Validate(); err != nil {
+		t.Fatalf("unsupported managed bundle report invalid: %v", err)
+	}
+}
+
+func TestManagedContainerdRuntimeProbeAttachesBundleAndScopedNamespace(t *testing.T) {
+	var calls []string
+	bundle := validManagedRuntimeBundleDescriptor()
+	installation, err := NewManagedContainerdRuntimeInstallation(bundle, filepath.Join(t.TempDir(), "managed-containerd-linux-amd64"))
+	if err != nil {
+		t.Fatalf("managed runtime installation: %v", err)
+	}
+	probe := ManagedContainerdRuntimeProbe(&installation, &fakeRuntimeCommandRunner{
+		path:  installation.CommandPath,
+		calls: &calls,
+		results: map[string]fakeRuntimeCommandResult{
+			installation.CommandPath + " version --format {{.Client.Version}}": {stdout: "1.7.7\n"},
+			managedRuntimeConformanceCommandKey(installation.CommandPath): {
+				stdout: validManagedRuntimeEvidenceJSON(),
+			},
+		},
+	}, time.Unix(1_700_000_000, 0).UTC())
+
+	report := probe.Probe(context.Background())
+
+	if report.Status != core.RuntimeBackendSupported {
+		t.Fatalf("status=%q want supported: %+v", report.Status, report)
+	}
+	if report.InstallBurden != core.RuntimeInstallBundled || report.Bundle == nil {
+		t.Fatalf("supported managed report missing bundled descriptor: %+v", report)
+	}
+	if err := report.ValidateAt(time.Unix(1_700_000_000, 0).UTC()); err != nil {
+		t.Fatalf("supported managed report invalid: %v", err)
+	}
+	for _, call := range calls {
+		if strings.HasPrefix(call, installation.CommandPath+" --namespace ") {
+			if !strings.Contains(call, "wfcompute-") || strings.Contains(call, "pool") || strings.Contains(call, "worker") {
+				t.Fatalf("managed runtime scope is not opaque: %q", call)
+			}
+			return
+		}
+	}
+	t.Fatalf("managed probe did not use scoped nerdctl args: %+v", calls)
+}
+
+func TestManagedContainerdRuntimeProbeRequiresScopedEvidence(t *testing.T) {
+	bundle := validManagedRuntimeBundleDescriptor()
+	installation, err := NewManagedContainerdRuntimeInstallation(bundle, filepath.Join(t.TempDir(), "managed-containerd-linux-amd64"))
+	if err != nil {
+		t.Fatalf("managed runtime installation: %v", err)
+	}
+	probe := ManagedContainerdRuntimeProbe(&installation, &fakeRuntimeCommandRunner{
+		path: installation.CommandPath,
+		results: map[string]fakeRuntimeCommandResult{
+			installation.CommandPath + " version --format {{.Client.Version}}": {stdout: "1.7.7\n"},
+			managedRuntimeConformanceCommandKey(installation.CommandPath): {
+				stdout: validRuntimeEvidenceJSON(),
+			},
+		},
+	}, time.Unix(1_700_000_000, 0).UTC())
+
+	report := probe.Probe(context.Background())
+
+	if report.Status != core.RuntimeBackendDegraded {
+		t.Fatalf("status=%q want degraded without scoped evidence: %+v", report.Status, report)
+	}
+	if len(report.ExecutorProviders) != 0 || len(report.Executors) != 0 {
+		t.Fatalf("managed runtime without scoped evidence advertised executors: %+v", report)
+	}
+}
+
+func TestManagedContainerdRuntimeProbesRequireInstallRootAndCurrentTarget(t *testing.T) {
+	catalog := validManagedRuntimeBundleCatalog()
+	if probes := ManagedContainerdRuntimeProbes(catalog, "", &fakeRuntimeCommandRunner{}, time.Unix(1_700_000_000, 0).UTC()); len(probes) != 0 {
+		t.Fatalf("managed probes without install root = %+v", probes)
+	}
+	installRoot := t.TempDir()
+	probes := ManagedContainerdRuntimeProbes(catalog, installRoot, &fakeRuntimeCommandRunner{}, time.Unix(1_700_000_000, 0).UTC())
+	if runtime.GOOS == "linux" && runtime.GOARCH == "amd64" {
+		if len(probes) != 1 || probes[0].Options.BackendID != "managed-containerd-linux-amd64" {
+			t.Fatalf("managed probes = %+v", probes)
+		}
+		if !filepath.IsAbs(probes[0].Options.Command) || !strings.HasPrefix(probes[0].Options.Command, installRoot) {
+			t.Fatalf("managed probe command is not rooted in install root: %q", probes[0].Options.Command)
+		}
+		return
+	}
+	if len(probes) != 0 {
+		t.Fatalf("unexpected managed probes for %s/%s: %+v", runtime.GOOS, runtime.GOARCH, probes)
+	}
+}
+
 func TestRuntimeBackendProbeRunsConformanceWithWorkspaceEnvAndReadOnlyRoot(t *testing.T) {
 	var calls []string
 	probe := RuntimeBackendProbe{
@@ -352,6 +487,82 @@ func defaultRuntimeConformanceCommandKey(tool string) string {
 
 func validRuntimeEvidenceJSON() string {
 	return `{"workspace":true,"network":true,"env":true,"proof":true,"cleanup":true}`
+}
+
+func validManagedRuntimeEvidenceJSON() string {
+	return `{"workspace":true,"network":true,"env":true,"proof":true,"cleanup":true,"details":["runtime-scope:wfcompute-06d10e1aef1733a0"]}`
+}
+
+func validManagedRuntimeBundleCatalog() ManagedRuntimeBundleCatalog {
+	return ManagedRuntimeBundleCatalog{
+		ReleaseTag:       "v2.3.1",
+		SourceBaseURL:    "https://github.com/containerd/nerdctl/releases/download/v2.3.1",
+		GeneratedAt:      time.Unix(1_700_000_000, 0).UTC(),
+		MinimumVersion:   "v2.3.1",
+		StableSigningKey: "containerd-nerdctl-release",
+		Bundles:          []core.ManagedRuntimeBundleDescriptor{validManagedRuntimeBundleDescriptor()},
+	}
+}
+
+func validManagedRuntimeBundleDescriptor() core.ManagedRuntimeBundleDescriptor {
+	return core.ManagedRuntimeBundleDescriptor{
+		ProtocolVersion: core.Version,
+		BundleID:        "managed-containerd-linux-amd64",
+		Family:          core.RuntimeBackendFamilyContainerd,
+		Tool:            core.ContainerRuntimeNerdctl,
+		Version:         "v2.3.1",
+		OS:              "linux",
+		Arch:            "amd64",
+		ArtifactName:    "nerdctl-full-2.3.1-linux-amd64.tar.gz",
+		ArtifactDigest:  "sha256:7a0d8efcf55b10b57d831541266adb9c6ec3d55b44ec041c95f6eb994d1faab9",
+		ChecksumName:    "SHA256SUMS",
+		ChecksumDigest:  "sha256:8a0586ff11d4d5a5d19d59494a10af8c6d41dd95ca72ff347f62d5288bc5131a",
+		SignatureName:   "SHA256SUMS.asc",
+		SignatureDigest: "sha256:f87400e0923e22eab251328bd210bb9e8d3bba2b58dbbb84699622474344d68c",
+		SignatureIssuer: "containerd/nerdctl release",
+		SignatureKeyID:  "containerd-nerdctl-release",
+		TrustRootDigest: "sha256:6fad18923304aba73378965a8bac49bf44a3a22da73df42ca6a081c726c36b34",
+		SignatureSubject: core.ManagedRuntimeSignatureSubject{
+			ArtifactDigest:          "sha256:7a0d8efcf55b10b57d831541266adb9c6ec3d55b44ec041c95f6eb994d1faab9",
+			RuntimeFamily:           core.RuntimeBackendFamilyContainerd,
+			OS:                      "linux",
+			Arch:                    "amd64",
+			Version:                 "v2.3.1",
+			Channel:                 "stable",
+			ConformanceProfile:      "distroless-static-v1",
+			ScopedStorePolicyDigest: "sha256:311ab6244d878cf7280a5927f5af6063337ec262e35fd7c84c6579d07591337e",
+		},
+		ValidUntil: time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC),
+		UpdatePolicy: core.ManagedRuntimeUpdatePolicy{
+			Channel:             "stable",
+			MinSupportedVersion: "v2.3.1",
+		},
+		CVEPolicy: core.ManagedRuntimeCVEPolicy{
+			PolicyDigest:     "sha256:5bc9d3baf40fe716e68bfc469c53040351288caaaa048650aeadd6320ca6d7c1",
+			UpdatedByVersion: "v2.3.1",
+		},
+		ScopedStore: core.ManagedRuntimeScopedStorePolicy{
+			Required:                      true,
+			NamespaceStrategy:             "opaque-worker-pool-scope",
+			StoreStrategy:                 "workflow-owned-content-store",
+			PolicyDigest:                  "sha256:311ab6244d878cf7280a5927f5af6063337ec262e35fd7c84c6579d07591337e",
+			CleanupRequired:               true,
+			HostGlobalVisibilityForbidden: true,
+		},
+		SupportedTargets: []core.ManagedRuntimeTarget{{
+			OS:   "linux",
+			Arch: "amd64",
+		}},
+		ConformanceProfile: "distroless-static-v1",
+		InstallBurden:      core.RuntimeInstallBundled,
+	}
+}
+
+func managedRuntimeConformanceCommandKey(command string) string {
+	digest := digestForRuntimeClaim("managed-containerd-linux-amd64", "distroless-static-v1", "scope")
+	return command + " --namespace wfcompute-" + digest[7:23] +
+		" run --rm --network none -v /tmp/wfcompute-runtime-probe-test:/workspace -w /workspace -e WFCOMPUTE_RUNTIME_PROBE=1 --read-only " +
+		defaultConformanceImageRef + " " + defaultConformanceCommand
 }
 
 func TestRuntimeProbeRedactsAuthFailures(t *testing.T) {

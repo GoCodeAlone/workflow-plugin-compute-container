@@ -228,6 +228,7 @@ type RuntimeBackendCatalogEntry struct {
 	BackendID           string                      `json:"backend_id"`
 	Families            []core.RuntimeBackendFamily `json:"families"`
 	Tools               []core.ContainerRuntimeTool `json:"tools"`
+	SupportedTargets    []core.ManagedRuntimeTarget `json:"supported_targets,omitempty"`
 	IsolationModes      []core.RuntimeIsolationMode `json:"isolation_modes"`
 	InstallBurdens      []core.RuntimeInstallBurden `json:"install_burdens"`
 	RuntimeProfiles     []core.RuntimeProfile       `json:"runtime_profiles"`

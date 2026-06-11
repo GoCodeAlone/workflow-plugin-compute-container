@@ -16,6 +16,9 @@ registry allowlists, proof/reward mutation, and worker binding.
 Runtime adapter metadata is published in `runtime-adapters.json` and referenced
 from `plugin.json` through `runtimeAdaptersRef`.
 
+Managed runtime bundle metadata is published in `managed-runtime-bundles.json`
+and referenced from `plugin.json` through `managedRuntimeBundlesRef`.
+
 ## Runtime Backend Probes
 
 The `container` package can probe Docker-compatible runtimes through
@@ -28,6 +31,23 @@ The default probe set covers Podman, Docker, and nerdctl/containerd. Supported
 reports are only emitted after the runtime executable is found, version probing
 works, and the conformance command succeeds. Degraded and unsupported reports do
 not advertise executor providers or executor refs.
+
+The `ManagedContainerdRuntimeProbes` helper builds target-aware probes from the
+managed runtime bundle catalog and an explicit agent-managed install root. The
+initial managed bundle target is Linux amd64 and is pinned to
+`containerd/nerdctl` `v2.3.1` `nerdctl-full-2.3.1-linux-amd64.tar.gz`. Agents
+must only advertise this backend after the bundle descriptor validates for the
+current OS/architecture, the pinned runtime has been downloaded and extracted
+into the agent-managed install root, the helper resolves an absolute
+`bin/nerdctl` path inside that root, and the same conformance checks pass. The
+managed backend uses an opaque nerdctl namespace so workloads run outside the
+host's default container namespace.
+
+Managed runtime release packaging verifies the upstream `SHA256SUMS` and
+`SHA256SUMS.asc` digests and emits a source manifest in the plugin release
+archive. Agent-side download, extraction, signature verification, and lifecycle
+wiring are intentionally left to the workflow-compute host integration phase so
+the plugin does not advertise a host-installed `nerdctl` as bundled.
 
 The default conformance image reference is the Debian 13 distroless static index:
 

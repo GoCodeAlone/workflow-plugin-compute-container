@@ -33,8 +33,9 @@ func TestPluginJSONReferencesRuntimeAdapters(t *testing.T) {
 		t.Fatal(err)
 	}
 	var manifest struct {
-		RuntimeAdaptersRef string `json:"runtimeAdaptersRef"`
-		Dependencies       []struct {
+		RuntimeAdaptersRef       string `json:"runtimeAdaptersRef"`
+		ManagedRuntimeBundlesRef string `json:"managedRuntimeBundlesRef"`
+		Dependencies             []struct {
 			Name       string `json:"name"`
 			Constraint string `json:"constraint"`
 		} `json:"dependencies"`
@@ -49,7 +50,7 @@ func TestPluginJSONReferencesRuntimeAdapters(t *testing.T) {
 	for _, dependency := range manifest.Dependencies {
 		if dependency.Name == "workflow-plugin-compute-core" {
 			coreDependencyFound = true
-			if dependency.Constraint != ">=0.5.0" {
+			if dependency.Constraint != ">=0.6.0" {
 				t.Fatalf("compute-core dependency constraint = %q", dependency.Constraint)
 			}
 		}
@@ -71,13 +72,14 @@ func TestPluginJSONReferencesRuntimeAdapters(t *testing.T) {
 	if len(catalog.Adapters) != 2 {
 		t.Fatalf("runtime adapter catalog incomplete: %+v", catalog)
 	}
-	if len(catalog.RuntimeBackends) != 3 {
+	if len(catalog.RuntimeBackends) != 4 {
 		t.Fatalf("runtime backend catalog incomplete: %+v", catalog)
 	}
 	wantBackends := map[string]core.ContainerRuntimeTool{
-		"podman-rootless":    core.ContainerRuntimePodman,
-		"docker-desktop":     core.ContainerRuntimeDocker,
-		"nerdctl-containerd": core.ContainerRuntimeNerdctl,
+		"podman-rootless":                core.ContainerRuntimePodman,
+		"docker-desktop":                 core.ContainerRuntimeDocker,
+		"nerdctl-containerd":             core.ContainerRuntimeNerdctl,
+		"managed-containerd-linux-amd64": core.ContainerRuntimeNerdctl,
 	}
 	for _, backend := range catalog.RuntimeBackends {
 		wantTool, ok := wantBackends[backend.BackendID]
@@ -89,10 +91,51 @@ func TestPluginJSONReferencesRuntimeAdapters(t *testing.T) {
 			!slices.Contains(backend.ExecutorProviders, container.SandboxedContainerBuildProviderName) {
 			t.Fatalf("runtime backend catalog missing expected entries: %+v", backend)
 		}
+		if backend.BackendID == "managed-containerd-linux-amd64" {
+			if len(backend.SupportedTargets) != 1 ||
+				backend.SupportedTargets[0].OS != "linux" ||
+				backend.SupportedTargets[0].Arch != "amd64" {
+				t.Fatalf("managed runtime backend target constraints missing: %+v", backend)
+			}
+		}
 		delete(wantBackends, backend.BackendID)
 	}
 	if len(wantBackends) != 0 {
 		t.Fatalf("runtime backend catalog missing entries: %+v", wantBackends)
+	}
+	if manifest.ManagedRuntimeBundlesRef != "managed-runtime-bundles.json" {
+		t.Fatalf("managedRuntimeBundlesRef = %q", manifest.ManagedRuntimeBundlesRef)
+	}
+	bundlesData, err := os.ReadFile(filepath.Join(root, manifest.ManagedRuntimeBundlesRef))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bundleCatalog container.ManagedRuntimeBundleCatalog
+	if err := json.Unmarshal(bundlesData, &bundleCatalog); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bundleCatalog.Bundle("managed-containerd-linux-amd64", bundleCatalog.GeneratedAt); err != nil {
+		t.Fatalf("managed runtime bundle catalog invalid: %v", err)
+	}
+	if bundleCatalog.ReleaseTag != "v2.3.1" ||
+		bundleCatalog.SourceBaseURL != "https://github.com/containerd/nerdctl/releases/download/v2.3.1" {
+		t.Fatalf("managed runtime bundle source metadata drifted: %+v", bundleCatalog)
+	}
+	if len(bundleCatalog.Bundles) != 1 {
+		t.Fatalf("managed runtime bundle catalog = %+v", bundleCatalog)
+	}
+	bundle := bundleCatalog.Bundles[0]
+	if bundle.ArtifactName != "nerdctl-full-2.3.1-linux-amd64.tar.gz" ||
+		bundle.ArtifactDigest != "sha256:7a0d8efcf55b10b57d831541266adb9c6ec3d55b44ec041c95f6eb994d1faab9" ||
+		bundle.ChecksumDigest != "sha256:8a0586ff11d4d5a5d19d59494a10af8c6d41dd95ca72ff347f62d5288bc5131a" ||
+		bundle.SignatureDigest != "sha256:f87400e0923e22eab251328bd210bb9e8d3bba2b58dbbb84699622474344d68c" {
+		t.Fatalf("managed runtime bundle descriptor is not pinned to the expected upstream asset: %+v", bundle)
+	}
+	bundlesText := string(bundlesData)
+	if strings.Contains(bundlesText, strings.Repeat("1", 32)) ||
+		strings.Contains(bundlesText, strings.Repeat("2", 32)) ||
+		strings.Contains(bundlesText, strings.Repeat("3", 32)) {
+		t.Fatalf("managed runtime bundle catalog contains placeholder digest material")
 	}
 	for _, adapter := range catalog.Adapters {
 		contract := adapter.Contract(core.RuntimeDescriptor{
@@ -131,9 +174,29 @@ func TestPluginContractsAdvertiseRuntimeBackendReports(t *testing.T) {
 			typ.Wire == "json" &&
 			typ.GoType == "github.com/GoCodeAlone/workflow-plugin-compute-core/protocol.RuntimeBackendReport" &&
 			typ.ProtocolVersion == core.Version &&
-			slices.Contains(typ.ProducedBy, "DockerCompatibleRuntimeProbes") {
+			slices.Contains(typ.ProducedBy, "DockerCompatibleRuntimeProbes") &&
+			slices.Contains(typ.ProducedBy, "ManagedContainerdRuntimeProbe") {
 			return
 		}
 	}
 	t.Fatalf("RuntimeBackendReport protocol type not advertised: %+v", contracts.ProtocolTypes)
+}
+
+func TestManagedRuntimeBundlePackagingScriptMatchesCatalogPins(t *testing.T) {
+	script, err := os.ReadFile(filepath.Join("..", "scripts", "package-managed-runtime-bundle.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"release_tag=\"v2.3.1\"",
+		"artifact_name=\"nerdctl-full-2.3.1-linux-amd64.tar.gz\"",
+		"artifact_digest=\"7a0d8efcf55b10b57d831541266adb9c6ec3d55b44ec041c95f6eb994d1faab9\"",
+		"checksum_digest=\"8a0586ff11d4d5a5d19d59494a10af8c6d41dd95ca72ff347f62d5288bc5131a\"",
+		"signature_digest=\"f87400e0923e22eab251328bd210bb9e8d3bba2b58dbbb84699622474344d68c\"",
+		"grep -F \"${artifact_digest}  ${artifact_name}\"",
+	} {
+		if !strings.Contains(string(script), want) {
+			t.Fatalf("managed runtime packaging script missing %q", want)
+		}
+	}
 }

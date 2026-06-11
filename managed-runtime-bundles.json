@@ -1,0 +1,62 @@
+{
+  "release_tag": "v2.3.1",
+  "source_base_url": "https://github.com/containerd/nerdctl/releases/download/v2.3.1",
+  "generated_at": "2026-06-11T00:00:00Z",
+  "minimum_version": "v2.3.1",
+  "stable_signing_key": "containerd-nerdctl-release",
+  "bundles": [
+    {
+      "protocol_version": "compute.v1alpha1",
+      "bundle_id": "managed-containerd-linux-amd64",
+      "family": "containerd",
+      "tool": "nerdctl",
+      "version": "v2.3.1",
+      "os": "linux",
+      "arch": "amd64",
+      "artifact_name": "nerdctl-full-2.3.1-linux-amd64.tar.gz",
+      "artifact_digest": "sha256:7a0d8efcf55b10b57d831541266adb9c6ec3d55b44ec041c95f6eb994d1faab9",
+      "checksum_name": "SHA256SUMS",
+      "checksum_digest": "sha256:8a0586ff11d4d5a5d19d59494a10af8c6d41dd95ca72ff347f62d5288bc5131a",
+      "signature_name": "SHA256SUMS.asc",
+      "signature_digest": "sha256:f87400e0923e22eab251328bd210bb9e8d3bba2b58dbbb84699622474344d68c",
+      "signature_issuer": "containerd/nerdctl release",
+      "signature_key_id": "containerd-nerdctl-release",
+      "trust_root_digest": "sha256:6fad18923304aba73378965a8bac49bf44a3a22da73df42ca6a081c726c36b34",
+      "signature_subject": {
+        "artifact_digest": "sha256:7a0d8efcf55b10b57d831541266adb9c6ec3d55b44ec041c95f6eb994d1faab9",
+        "runtime_family": "containerd",
+        "os": "linux",
+        "arch": "amd64",
+        "version": "v2.3.1",
+        "channel": "stable",
+        "conformance_profile": "distroless-static-v1",
+        "scoped_store_policy_digest": "sha256:311ab6244d878cf7280a5927f5af6063337ec262e35fd7c84c6579d07591337e"
+      },
+      "valid_until": "2026-12-31T00:00:00Z",
+      "update_policy": {
+        "channel": "stable",
+        "min_supported_version": "v2.3.1"
+      },
+      "cve_policy": {
+        "policy_digest": "sha256:5bc9d3baf40fe716e68bfc469c53040351288caaaa048650aeadd6320ca6d7c1",
+        "updated_by_version": "v2.3.1"
+      },
+      "scoped_store": {
+        "required": true,
+        "namespace_strategy": "opaque-worker-pool-scope",
+        "store_strategy": "workflow-owned-content-store",
+        "policy_digest": "sha256:311ab6244d878cf7280a5927f5af6063337ec262e35fd7c84c6579d07591337e",
+        "cleanup_required": true,
+        "host_global_visibility_forbidden": true
+      },
+      "supported_targets": [
+        {
+          "os": "linux",
+          "arch": "amd64"
+        }
+      ],
+      "conformance_profile": "distroless-static-v1",
+      "install_burden": "bundled"
+    }
+  ]
+}
