@@ -3,6 +3,10 @@ set -euo pipefail
 export LC_ALL=C
 export LANG=C
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "${script_dir}/.." && pwd)"
+cd "$repo_root"
+
 out_dir=".release/managed-runtime-bundles"
 bundle_id="managed-containerd-linux-amd64"
 release_tag="v2.3.1"

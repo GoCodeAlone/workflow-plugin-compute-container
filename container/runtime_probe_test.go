@@ -251,6 +251,7 @@ func TestManagedContainerdRuntimeProbeAttachesBundleAndScopedNamespace(t *testin
 			},
 		},
 	}, time.Unix(1_700_000_000, 0).UTC())
+	probe.Options.ConformanceWorkspace = "/tmp/wfcompute-runtime-probe-test"
 
 	report := probe.Probe(context.Background())
 
@@ -289,6 +290,7 @@ func TestManagedContainerdRuntimeProbeRequiresScopedEvidence(t *testing.T) {
 			},
 		},
 	}, time.Unix(1_700_000_000, 0).UTC())
+	probe.Options.ConformanceWorkspace = "/tmp/wfcompute-runtime-probe-test"
 
 	report := probe.Probe(context.Background())
 
