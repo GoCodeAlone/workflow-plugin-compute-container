@@ -59,6 +59,35 @@ func TestDockerCompatibleRuntimeBuildsBreakoutResistantArgs(t *testing.T) {
 	}
 }
 
+func TestDockerCompatibleRuntimeClearsImageEntrypointForExplicitCommand(t *testing.T) {
+	image := "ghcr.io/gocodealone/workload-with-entrypoint@sha256:" + strings.Repeat("a", 64)
+	spec, cleanup, err := (DockerSandboxRuntime{}).prepareRun(SandboxRunRequest{
+		Image:     image,
+		Command:   []string{"/workspace/provider/dynamic-provider"},
+		Workspace: t.TempDir(),
+		Network:   SandboxNetworkBridge,
+	})
+	if err != nil {
+		t.Fatalf("prepare run: %v", err)
+	}
+	defer cleanup()
+	args := strings.Join(spec.Args, "\x00")
+	entrypointAt := strings.Index(args, "--entrypoint\x00\x00")
+	if entrypointAt < 0 {
+		t.Fatalf("docker args must clear image entrypoint for explicit command: %q", args)
+	}
+	imageAt := strings.Index(args, image)
+	if imageAt < 0 {
+		t.Fatalf("image arg missing: %q", args)
+	}
+	if entrypointAt > imageAt {
+		t.Fatalf("--entrypoint must appear before image arg: %q", args)
+	}
+	if !strings.Contains(args, image+"\x00/workspace/provider/dynamic-provider") {
+		t.Fatalf("explicit command must remain after image arg: %q", args)
+	}
+}
+
 func TestDockerCompatibleRuntimeUsesDefaultDenyNetwork(t *testing.T) {
 	spec, cleanup, err := (DockerSandboxRuntime{}).prepareRun(SandboxRunRequest{
 		Image:     "ghcr.io/gocodealone/workload:latest",
