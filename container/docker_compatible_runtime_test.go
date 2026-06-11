@@ -110,6 +110,22 @@ func TestDockerCompatibleRuntimePreservesImageEntrypointForCommandArgsByDefault(
 	}
 }
 
+func TestDockerCompatibleRuntimeRequiresCommandForEntrypointOverride(t *testing.T) {
+	for _, command := range [][]string{nil, []string{""}} {
+		_, cleanup, err := (DockerSandboxRuntime{}).prepareRun(SandboxRunRequest{
+			Image:                      "ghcr.io/gocodealone/workload-with-entrypoint:latest",
+			Command:                    command,
+			CommandOverridesEntrypoint: true,
+			Workspace:                  t.TempDir(),
+			Network:                    SandboxNetworkBridge,
+		})
+		cleanup()
+		if err == nil || !strings.Contains(err.Error(), "entrypoint override requires a command") {
+			t.Fatalf("entrypoint override accepted command %#v: %v", command, err)
+		}
+	}
+}
+
 func TestDockerCompatibleRuntimeUsesDefaultDenyNetwork(t *testing.T) {
 	spec, cleanup, err := (DockerSandboxRuntime{}).prepareRun(SandboxRunRequest{
 		Image:     "ghcr.io/gocodealone/workload:latest",

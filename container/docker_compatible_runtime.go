@@ -177,6 +177,10 @@ func (r DockerSandboxRuntime) prepareRun(req SandboxRunRequest) (dockerRunSpec, 
 		args = append(args, "--env-file", envFile)
 	}
 	if req.CommandOverridesEntrypoint {
+		if len(req.Command) == 0 || strings.TrimSpace(req.Command[0]) == "" {
+			cleanup()
+			return dockerRunSpec{}, cleanup, errors.New("entrypoint override requires a command")
+		}
 		args = append(args, "--entrypoint", "")
 	}
 	args = append(args, req.Image)
