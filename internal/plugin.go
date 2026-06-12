@@ -5,8 +5,7 @@ import (
 	sdk "github.com/GoCodeAlone/workflow/plugin/external/sdk"
 )
 
-// Version is set at build time via -ldflags
-// "-X github.com/GoCodeAlone/workflow-plugin-compute-container/internal.Version=X.Y.Z".
+// Version is set at build time by the release ldflags alongside main.version.
 var Version = "0.0.0"
 
 // ComputeContainerPlugin exposes command/container-build runtime adapter metadata.

@@ -12,13 +12,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
-	"golang.org/x/crypto/openpgp"
-	"golang.org/x/crypto/openpgp/armor"
-	"golang.org/x/crypto/openpgp/packet"
+	"github.com/ProtonMail/go-crypto/openpgp"
+	"github.com/ProtonMail/go-crypto/openpgp/armor"
+	"github.com/ProtonMail/go-crypto/openpgp/packet"
 )
 
 func TestManagedRuntimeBundleInstallerLifecycleUsesScopedRootAndPinnedObjects(t *testing.T) {
@@ -186,6 +187,93 @@ func TestManagedRuntimeBundleInstallerRejectsArchivePathEscape(t *testing.T) {
 	}
 }
 
+func TestManagedRuntimeBundleInstallerAllowsSafeArchiveSymlink(t *testing.T) {
+	ctx := context.Background()
+	catalog, objects := testManagedRuntimeCatalogAndObjects(t, map[string]string{
+		"bin/nerdctl":        "#!/bin/sh\nprintf nerdctl-test\n",
+		"bin/helper":         "SYMLINK:nerdctl",
+		"bin/cni-helper":     "SYMLINK:../libexec/cni/helper",
+		"libexec/cni/helper": "#!/bin/sh\nprintf cni-helper\n",
+	})
+	installRoot := realManagedRuntimeTestDir(t)
+	installer := ManagedRuntimeBundleInstaller{
+		Catalog:     catalog,
+		InstallRoot: installRoot,
+		Source:      managedRuntimeTestSource(objects),
+		Now:         func() time.Time { return catalog.GeneratedAt },
+	}
+
+	installed, err := installer.Install(ctx, ManagedRuntimeInstallRequest{
+		BundleID:   catalog.Bundles[0].BundleID,
+		TargetOS:   "linux",
+		TargetArch: "amd64",
+	})
+	if err != nil {
+		t.Fatalf("install managed runtime bundle: %v", err)
+	}
+	target, err := os.Readlink(filepath.Join(installed.Root, "bin", "helper"))
+	if err != nil {
+		t.Fatalf("read installed symlink: %v", err)
+	}
+	if target != "nerdctl" {
+		t.Fatalf("symlink target = %q, want nerdctl", target)
+	}
+	target, err = os.Readlink(filepath.Join(installed.Root, "bin", "cni-helper"))
+	if err != nil {
+		t.Fatalf("read nested installed symlink: %v", err)
+	}
+	if target != "../libexec/cni/helper" {
+		t.Fatalf("nested symlink target = %q, want ../libexec/cni/helper", target)
+	}
+}
+
+func TestManagedRuntimeBundleInstallerRejectsArchiveSymlinkEscape(t *testing.T) {
+	ctx := context.Background()
+	catalog, objects := testManagedRuntimeCatalogAndObjects(t, map[string]string{
+		"bin/nerdctl": "#!/bin/sh\nprintf nerdctl-test\n",
+		"bin/helper":  "SYMLINK:../../escape",
+	})
+	installer := ManagedRuntimeBundleInstaller{
+		Catalog:     catalog,
+		InstallRoot: realManagedRuntimeTestDir(t),
+		Source:      managedRuntimeTestSource(objects),
+		Now:         func() time.Time { return catalog.GeneratedAt },
+	}
+
+	_, err := installer.Install(ctx, ManagedRuntimeInstallRequest{
+		BundleID:   catalog.Bundles[0].BundleID,
+		TargetOS:   "linux",
+		TargetArch: "amd64",
+	})
+	if err == nil || !strings.Contains(err.Error(), "unsafe archive symlink target") {
+		t.Fatalf("install error = %v, want unsafe archive symlink target failure", err)
+	}
+}
+
+func TestExtractManagedRuntimeTarGzipRejectsArchiveEntryBelowSymlink(t *testing.T) {
+	content := testManagedRuntimeTarGzipEntries(t, []testManagedRuntimeTarEntry{
+		{Name: "bin/link", Content: "SYMLINK:../libexec"},
+		{Name: "bin/link/file", Content: "content"},
+	})
+
+	err := extractManagedRuntimeTarGzip(content, t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "under symlink") {
+		t.Fatalf("extract error = %v, want under symlink failure", err)
+	}
+}
+
+func TestExtractManagedRuntimeTarGzipRejectsDuplicateArchiveEntry(t *testing.T) {
+	content := testManagedRuntimeTarGzipEntries(t, []testManagedRuntimeTarEntry{
+		{Name: "bin/nerdctl", Content: "#!/bin/sh\nprintf one\n"},
+		{Name: "bin/nerdctl", Content: "#!/bin/sh\nprintf two\n"},
+	})
+
+	err := extractManagedRuntimeTarGzip(content, t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "duplicate archive entry") {
+		t.Fatalf("extract error = %v, want duplicate archive entry failure", err)
+	}
+}
+
 func TestManagedRuntimeBundleInstallerRejectsSymlinkedInstallRoot(t *testing.T) {
 	ctx := context.Background()
 	catalog, objects := testManagedRuntimeCatalogAndObjects(t, map[string]string{
@@ -282,13 +370,54 @@ func TestManagedRuntimeBundleInstallerDoctorRejectsCommandSymlink(t *testing.T) 
 	}
 }
 
-func TestHTTPManagedRuntimeBundleObjectSourceDefaultClientHasTimeout(t *testing.T) {
+func TestManagedRuntimeBundleInstallerDoctorRejectsTamperedSymlinkSpelling(t *testing.T) {
+	ctx := context.Background()
+	catalog, objects := testManagedRuntimeCatalogAndObjects(t, map[string]string{
+		"bin/nerdctl": "#!/bin/sh\nprintf nerdctl-test\n",
+		"bin/helper":  "SYMLINK:nerdctl",
+	})
+	installer := ManagedRuntimeBundleInstaller{
+		Catalog:     catalog,
+		InstallRoot: realManagedRuntimeTestDir(t),
+		Source:      managedRuntimeTestSource(objects),
+		Now:         func() time.Time { return catalog.GeneratedAt },
+	}
+	installed, err := installer.Install(ctx, ManagedRuntimeInstallRequest{
+		BundleID:   catalog.Bundles[0].BundleID,
+		TargetOS:   "linux",
+		TargetArch: "amd64",
+	})
+	if err != nil {
+		t.Fatalf("install managed runtime bundle: %v", err)
+	}
+	helperPath := filepath.Join(installed.Root, "bin", "helper")
+	if err := os.Remove(helperPath); err != nil {
+		t.Fatalf("remove helper symlink: %v", err)
+	}
+	if err := os.Symlink("./nerdctl", helperPath); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	doctor, err := installer.Doctor(ctx, ManagedRuntimeDoctorRequest{
+		BundleID:   catalog.Bundles[0].BundleID,
+		TargetOS:   "linux",
+		TargetArch: "amd64",
+	})
+	if err != nil {
+		t.Fatalf("doctor managed runtime bundle: %v", err)
+	}
+	if doctor.Status == ManagedRuntimeLifecycleStatusOK || !strings.Contains(doctor.Reason, "file digest") {
+		t.Fatalf("doctor = %#v, want file digest degradation", doctor)
+	}
+}
+
+func TestHTTPManagedRuntimeBundleObjectSourceDefaultClientAllowsLargeArtifactDownloads(t *testing.T) {
 	source := HTTPManagedRuntimeBundleObjectSource{}
 
 	client := source.httpClient()
 
-	if client.Timeout <= 0 {
-		t.Fatalf("default managed runtime HTTP client timeout = %s, want positive timeout", client.Timeout)
+	if client.Timeout < 10*time.Minute {
+		t.Fatalf("default managed runtime HTTP client timeout = %s, want at least 10m for large artifacts", client.Timeout)
 	}
 }
 
@@ -592,14 +721,43 @@ func testManagedRuntimeDetachedSignature(t *testing.T, entity *openpgp.Entity, c
 }
 
 func testManagedRuntimeTarGzip(t *testing.T, files map[string]string) []byte {
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	entries := make([]testManagedRuntimeTarEntry, 0, len(names))
+	for _, name := range names {
+		entries = append(entries, testManagedRuntimeTarEntry{Name: name, Content: files[name]})
+	}
+	return testManagedRuntimeTarGzipEntries(t, entries)
+}
+
+type testManagedRuntimeTarEntry struct {
+	Name    string
+	Content string
+}
+
+func testManagedRuntimeTarGzipEntries(t *testing.T, entries []testManagedRuntimeTarEntry) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gz)
-	for name, content := range files {
-		body := []byte(content)
+	for _, entry := range entries {
+		if target, ok := strings.CutPrefix(entry.Content, "SYMLINK:"); ok {
+			if err := tw.WriteHeader(&tar.Header{
+				Name:     entry.Name,
+				Mode:     0o755,
+				Typeflag: tar.TypeSymlink,
+				Linkname: target,
+			}); err != nil {
+				t.Fatalf("write tar symlink header: %v", err)
+			}
+			continue
+		}
+		body := []byte(entry.Content)
 		if err := tw.WriteHeader(&tar.Header{
-			Name: name,
+			Name: entry.Name,
 			Mode: 0o755,
 			Size: int64(len(body)),
 		}); err != nil {

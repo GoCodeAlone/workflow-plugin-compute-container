@@ -18,9 +18,9 @@ import (
 
 	"github.com/GoCodeAlone/workflow-plugin-compute-container/container"
 	core "github.com/GoCodeAlone/workflow-plugin-compute-core/protocol"
-	"golang.org/x/crypto/openpgp"
-	"golang.org/x/crypto/openpgp/armor"
-	"golang.org/x/crypto/openpgp/packet"
+	"github.com/ProtonMail/go-crypto/openpgp"
+	"github.com/ProtonMail/go-crypto/openpgp/armor"
+	"github.com/ProtonMail/go-crypto/openpgp/packet"
 )
 
 func TestManagedRuntimeCLIInstallDoctorUninstallLifecycle(t *testing.T) {
