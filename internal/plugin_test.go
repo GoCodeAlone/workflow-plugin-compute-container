@@ -182,6 +182,47 @@ func TestPluginContractsAdvertiseRuntimeBackendReports(t *testing.T) {
 	t.Fatalf("RuntimeBackendReport protocol type not advertised: %+v", contracts.ProtocolTypes)
 }
 
+func TestPluginContractsAdvertiseManagedRuntimeInstaller(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "plugin.contracts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var contracts struct {
+		Contracts []struct {
+			Name       string   `json:"name"`
+			Wire       string   `json:"wire"`
+			GoType     string   `json:"goType"`
+			Commands   []string `json:"commands"`
+			Produces   []string `json:"produces"`
+			Guarantees []string `json:"guarantees"`
+		} `json:"contracts"`
+	}
+	if err := json.Unmarshal(data, &contracts); err != nil {
+		t.Fatal(err)
+	}
+	for _, contract := range contracts.Contracts {
+		if contract.Name != "ManagedRuntimeBundleInstaller" {
+			continue
+		}
+		if contract.Wire != "json" ||
+			contract.GoType != "github.com/GoCodeAlone/workflow-plugin-compute-container/container.ManagedRuntimeBundleInstaller" ||
+			!slices.Contains(contract.Commands, "managed-runtime install") ||
+			!slices.Contains(contract.Commands, "managed-runtime doctor") ||
+			!slices.Contains(contract.Commands, "managed-runtime uninstall") ||
+			!slices.Contains(contract.Commands, "managed-runtime reinstall") ||
+			!slices.Contains(contract.Produces, "ManagedRuntimeInstallResult") ||
+			!slices.Contains(contract.Produces, "ManagedRuntimeDoctorResult") ||
+			!slices.Contains(contract.Produces, "ManagedRuntimeUninstallResult") ||
+			!slices.Contains(contract.Produces, "ManagedRuntimeReinstallResult") ||
+			!slices.Contains(contract.Guarantees, "scoped-install-root") ||
+			!slices.Contains(contract.Guarantees, "pinned-artifact-checksum-signature-digests") {
+			t.Fatalf("managed runtime installer contract incomplete: %+v", contract)
+		}
+		return
+	}
+	t.Fatalf("ManagedRuntimeBundleInstaller contract not advertised: %+v", contracts.Contracts)
+}
+
 func TestManagedRuntimeBundlePackagingScriptMatchesCatalogPins(t *testing.T) {
 	script, err := os.ReadFile(filepath.Join("..", "scripts", "package-managed-runtime-bundle.sh"))
 	if err != nil {
