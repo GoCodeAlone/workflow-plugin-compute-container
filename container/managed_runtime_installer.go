@@ -20,11 +20,11 @@ import (
 	"time"
 
 	core "github.com/GoCodeAlone/workflow-plugin-compute-core/protocol"
-	"golang.org/x/crypto/openpgp"
+	"github.com/ProtonMail/go-crypto/openpgp"
 )
 
 const managedRuntimeInstallManifestName = "wfcompute-managed-runtime-install.json"
-const defaultManagedRuntimeHTTPTimeout = 30 * time.Second
+const defaultManagedRuntimeHTTPTimeout = 15 * time.Minute
 const defaultManagedRuntimeHTTPMaxBytes = 512 << 20
 
 type ManagedRuntimeLifecycleStatus string
@@ -571,7 +571,7 @@ func verifyManagedRuntimeSignature(bundle core.ManagedRuntimeBundleDescriptor, c
 	if err != nil {
 		return fmt.Errorf("managed runtime signature verification trust root: %w", err)
 	}
-	signer, err := openpgp.CheckArmoredDetachedSignature(keyring, bytes.NewReader(checksum), bytes.NewReader(signature))
+	signer, err := openpgp.CheckArmoredDetachedSignature(keyring, bytes.NewReader(checksum), bytes.NewReader(signature), nil)
 	if err != nil {
 		return fmt.Errorf("managed runtime signature verification failed: %w", err)
 	}
@@ -757,10 +757,19 @@ func managedRuntimeFileDigests(root, skipRel string) (map[string]string, error) 
 		if err != nil {
 			return err
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("managed runtime path %q contains symlink", pathValue)
-		}
 		if entry.IsDir() {
+			return nil
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(pathValue)
+			if err != nil {
+				return err
+			}
+			digestTarget, err := managedRuntimeSymlinkDigestTarget(rel, target)
+			if err != nil {
+				return err
+			}
+			out[rel] = "sha256:" + managedRuntimeDigestHex([]byte("symlink:"+digestTarget))
 			return nil
 		}
 		if !info.Mode().IsRegular() {
@@ -840,6 +849,8 @@ func extractManagedRuntimeTarGzip(content []byte, dest string) error {
 	}
 	defer root.Close()
 	tr := tar.NewReader(gz)
+	seen := map[string]struct{}{}
+	symlinkEntries := map[string]struct{}{}
 	for {
 		header, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -852,11 +863,18 @@ func extractManagedRuntimeTarGzip(content []byte, dest string) error {
 		if err != nil {
 			return err
 		}
+		if _, ok := seen[name]; ok {
+			return fmt.Errorf("duplicate archive entry %q", header.Name)
+		}
+		if managedRuntimeArchiveHasSymlinkAncestor(name, symlinkEntries) {
+			return fmt.Errorf("unsafe archive path %q is under symlink", header.Name)
+		}
 		switch header.Typeflag {
 		case tar.TypeDir:
 			if err := root.MkdirAll(name, modePerm(header.FileInfo().Mode())|0o700); err != nil {
 				return err
 			}
+			seen[name] = struct{}{}
 		case tar.TypeReg, tar.TypeRegA:
 			if err := root.MkdirAll(path.Dir(name), 0o700); err != nil {
 				return err
@@ -877,6 +895,20 @@ func extractManagedRuntimeTarGzip(content []byte, dest string) error {
 			if closeErr != nil {
 				return closeErr
 			}
+			seen[name] = struct{}{}
+		case tar.TypeSymlink:
+			linkTarget, err := managedRuntimeArchiveSymlinkTarget(name, header.Linkname)
+			if err != nil {
+				return err
+			}
+			if err := root.MkdirAll(path.Dir(name), 0o700); err != nil {
+				return err
+			}
+			if err := root.Symlink(linkTarget, name); err != nil {
+				return err
+			}
+			seen[name] = struct{}{}
+			symlinkEntries[name] = struct{}{}
 		default:
 			return fmt.Errorf("unsafe archive entry type %d for %q", header.Typeflag, header.Name)
 		}
@@ -895,6 +927,41 @@ func managedRuntimeArchiveLocalPath(name string) (string, error) {
 		return "", fmt.Errorf("unsafe archive path %q", name)
 	}
 	return clean, nil
+}
+
+func managedRuntimeArchiveHasSymlinkAncestor(name string, symlinkEntries map[string]struct{}) bool {
+	for dir := path.Dir(name); dir != "."; dir = path.Dir(dir) {
+		if _, ok := symlinkEntries[dir]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func managedRuntimeArchiveSymlinkTarget(entryName, target string) (string, error) {
+	if _, err := managedRuntimeSymlinkDigestTarget(entryName, target); err != nil {
+		return "", err
+	}
+	return path.Clean(target), nil
+}
+
+func managedRuntimeSymlinkDigestTarget(entryName, target string) (string, error) {
+	if strings.TrimSpace(target) == "" || strings.Contains(target, "\\") || path.IsAbs(target) {
+		return "", fmt.Errorf("unsafe archive symlink target %q", target)
+	}
+	entryClean, err := managedRuntimeArchiveLocalPath(entryName)
+	if err != nil {
+		return "", err
+	}
+	targetClean := path.Clean(target)
+	if targetClean == "." {
+		return "", fmt.Errorf("unsafe archive symlink target %q", target)
+	}
+	resolved := path.Clean(path.Join(path.Dir(entryClean), targetClean))
+	if resolved == "." || resolved == ".." || strings.HasPrefix(resolved, "../") {
+		return "", fmt.Errorf("unsafe archive symlink target %q", target)
+	}
+	return targetClean, nil
 }
 
 func modePerm(mode os.FileMode) os.FileMode {

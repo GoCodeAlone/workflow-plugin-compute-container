@@ -5,6 +5,7 @@ go 1.26.0
 require (
 	github.com/GoCodeAlone/workflow v0.62.0
 	github.com/GoCodeAlone/workflow-plugin-compute-core v0.6.0
+	github.com/ProtonMail/go-crypto v1.4.1
 )
 
 require (
@@ -39,6 +40,7 @@ require (
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cloudevents/sdk-go/v2 v2.16.2 // indirect
+	github.com/cloudflare/circl v1.6.2 // indirect
 	github.com/containerd/errdefs v1.0.0 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
 	github.com/danieljoos/wincred v1.2.3 // indirect
