@@ -16,10 +16,19 @@ type ManagedRuntimeBundleCatalog struct {
 	SourceBaseURL    string                                `json:"source_base_url,omitempty"`
 	GeneratedAt      time.Time                             `json:"generated_at"`
 	Bundles          []core.ManagedRuntimeBundleDescriptor `json:"bundles"`
+	TrustRoots       []ManagedRuntimeTrustRoot             `json:"trust_roots,omitempty"`
 	BlockedVersions  []string                              `json:"blocked_versions,omitempty"`
 	RevokedKeyIDs    []string                              `json:"revoked_key_ids,omitempty"`
 	MinimumVersion   string                                `json:"minimum_version,omitempty"`
 	StableSigningKey string                                `json:"stable_signing_key,omitempty"`
+}
+
+type ManagedRuntimeTrustRoot struct {
+	KeyID  string `json:"key_id"`
+	Name   string `json:"name"`
+	URL    string `json:"url,omitempty"`
+	Digest string `json:"digest"`
+	Issuer string `json:"issuer,omitempty"`
 }
 
 func (c ManagedRuntimeBundleCatalog) Bundle(bundleID string, now time.Time) (core.ManagedRuntimeBundleDescriptor, error) {
@@ -50,6 +59,18 @@ func (c ManagedRuntimeBundleCatalog) BundleForTarget(bundleID, targetOS, targetA
 		return core.ManagedRuntimeBundleDescriptor{}, fmt.Errorf("managed runtime bundle %q does not support %s/%s", bundleID, targetOS, targetArch)
 	}
 	return bundle, nil
+}
+
+func (c ManagedRuntimeBundleCatalog) TrustRootForBundle(bundle core.ManagedRuntimeBundleDescriptor) (ManagedRuntimeTrustRoot, error) {
+	for _, root := range c.TrustRoots {
+		if root.KeyID == bundle.SignatureKeyID && root.Digest == bundle.TrustRootDigest {
+			if strings.TrimSpace(root.Name) == "" {
+				return ManagedRuntimeTrustRoot{}, fmt.Errorf("managed runtime trust root for key %q has no object name", bundle.SignatureKeyID)
+			}
+			return root, nil
+		}
+	}
+	return ManagedRuntimeTrustRoot{}, fmt.Errorf("managed runtime trust root for signing key %q and digest %q not found", bundle.SignatureKeyID, bundle.TrustRootDigest)
 }
 
 func validateManagedRuntimeBundlePolicy(c ManagedRuntimeBundleCatalog, bundle core.ManagedRuntimeBundleDescriptor, now time.Time) error {

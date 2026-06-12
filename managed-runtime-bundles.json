@@ -3,7 +3,7 @@
   "source_base_url": "https://github.com/containerd/nerdctl/releases/download/v2.3.1",
   "generated_at": "2026-06-11T00:00:00Z",
   "minimum_version": "v2.3.1",
-  "stable_signing_key": "containerd-nerdctl-release",
+  "stable_signing_key": "E14F08B8908ED6E8",
   "bundles": [
     {
       "protocol_version": "compute.v1alpha1",
@@ -20,8 +20,8 @@
       "signature_name": "SHA256SUMS.asc",
       "signature_digest": "sha256:f87400e0923e22eab251328bd210bb9e8d3bba2b58dbbb84699622474344d68c",
       "signature_issuer": "containerd/nerdctl release",
-      "signature_key_id": "containerd-nerdctl-release",
-      "trust_root_digest": "sha256:6fad18923304aba73378965a8bac49bf44a3a22da73df42ca6a081c726c36b34",
+      "signature_key_id": "E14F08B8908ED6E8",
+      "trust_root_digest": "sha256:812ecad48a498fe3fbda46805da3fb2e98328531e3aac3e171a63c9daa1d9206",
       "signature_subject": {
         "artifact_digest": "sha256:7a0d8efcf55b10b57d831541266adb9c6ec3d55b44ec041c95f6eb994d1faab9",
         "runtime_family": "containerd",
@@ -57,6 +57,15 @@
       ],
       "conformance_profile": "distroless-static-v1",
       "install_burden": "bundled"
+    }
+  ],
+  "trust_roots": [
+    {
+      "key_id": "E14F08B8908ED6E8",
+      "name": "ChengyuZhu6.gpg",
+      "url": "https://github.com/ChengyuZhu6.gpg",
+      "digest": "sha256:812ecad48a498fe3fbda46805da3fb2e98328531e3aac3e171a63c9daa1d9206",
+      "issuer": "Chengyu Zhu <hudson@cyzhu.com>"
     }
   ]
 }
