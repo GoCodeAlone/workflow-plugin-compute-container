@@ -7,6 +7,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,6 +52,9 @@ func TestManagedRuntimeBundleInstallerLifecycleUsesScopedRootAndPinnedObjects(t 
 	wantCommand := filepath.Join(installed.Root, "bin", "nerdctl")
 	if installed.CommandPath != wantCommand {
 		t.Fatalf("command path = %q, want %q", installed.CommandPath, wantCommand)
+	}
+	if installed.FileDigests["bin/nerdctl"] == "" {
+		t.Fatalf("install result missing file digests: %#v", installed.FileDigests)
 	}
 	if _, err := os.Stat(installed.CommandPath); err != nil {
 		t.Fatalf("installed command missing: %v", err)
@@ -368,6 +374,89 @@ func TestManagedRuntimeBundleInstallerReinstallKeepsOldRuntimeWhenReplacementFet
 	}
 }
 
+func TestManagedRuntimeBundleInstallerReinstallReportsWhetherPriorRuntimeWasReplaced(t *testing.T) {
+	ctx := context.Background()
+	catalog, objects := testManagedRuntimeCatalogAndObjects(t, map[string]string{
+		"bin/nerdctl": "#!/bin/sh\nprintf nerdctl-test\n",
+	})
+	installer := ManagedRuntimeBundleInstaller{
+		Catalog:     catalog,
+		InstallRoot: realManagedRuntimeTestDir(t),
+		Source:      managedRuntimeTestSource(objects),
+		Now:         func() time.Time { return catalog.GeneratedAt },
+	}
+
+	first, err := installer.Reinstall(ctx, ManagedRuntimeInstallRequest{
+		BundleID:   catalog.Bundles[0].BundleID,
+		TargetOS:   "linux",
+		TargetArch: "amd64",
+	})
+	if err != nil {
+		t.Fatalf("first reinstall: %v", err)
+	}
+	if first.Uninstall.Removed {
+		t.Fatalf("first reinstall removed = true, want false for no prior runtime: %#v", first.Uninstall)
+	}
+	second, err := installer.Reinstall(ctx, ManagedRuntimeInstallRequest{
+		BundleID:   catalog.Bundles[0].BundleID,
+		TargetOS:   "linux",
+		TargetArch: "amd64",
+	})
+	if err != nil {
+		t.Fatalf("second reinstall: %v", err)
+	}
+	if !second.Uninstall.Removed {
+		t.Fatalf("second reinstall removed = false, want true for replacement: %#v", second.Uninstall)
+	}
+}
+
+func TestManagedRuntimeBundleInstallerUninstallRejectsUnmanagedDirectory(t *testing.T) {
+	ctx := context.Background()
+	catalog, _ := testManagedRuntimeCatalogAndObjects(t, map[string]string{
+		"bin/nerdctl": "#!/bin/sh\nprintf nerdctl-test\n",
+	})
+	installRoot := realManagedRuntimeTestDir(t)
+	unmanaged := filepath.Join(installRoot, catalog.Bundles[0].BundleID)
+	if err := os.MkdirAll(unmanaged, 0o700); err != nil {
+		t.Fatalf("write unmanaged root: %v", err)
+	}
+	sentinel := filepath.Join(unmanaged, "sentinel.txt")
+	if err := os.WriteFile(sentinel, []byte("keep"), 0o600); err != nil {
+		t.Fatalf("write unmanaged sentinel: %v", err)
+	}
+	installer := ManagedRuntimeBundleInstaller{
+		Catalog:     catalog,
+		InstallRoot: installRoot,
+		Now:         func() time.Time { return catalog.GeneratedAt },
+	}
+
+	_, err := installer.Uninstall(ctx, ManagedRuntimeUninstallRequest{
+		BundleID: catalog.Bundles[0].BundleID,
+	})
+	if err == nil || !strings.Contains(err.Error(), "install manifest") {
+		t.Fatalf("uninstall error = %v, want unmanaged manifest failure", err)
+	}
+	if _, statErr := os.Stat(sentinel); statErr != nil {
+		t.Fatalf("unmanaged sentinel removed: %v", statErr)
+	}
+}
+
+func TestHTTPManagedRuntimeBundleObjectSourceRejectsOversizedObject(t *testing.T) {
+	source := HTTPManagedRuntimeBundleObjectSource{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(w, io.LimitReader(zeroReader{}, defaultManagedRuntimeHTTPMaxBytes+1))
+	}))
+	defer server.Close()
+
+	_, err := source.FetchManagedRuntimeBundleObject(context.Background(), ManagedRuntimeBundleObjectRequest{
+		Name: "oversized",
+		URL:  server.URL,
+	})
+	if err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("fetch error = %v, want oversized object failure", err)
+	}
+}
+
 func managedRuntimeTestSource(objects map[string][]byte) ManagedRuntimeBundleObjectSource {
 	return ManagedRuntimeBundleObjectSourceFunc(func(_ context.Context, request ManagedRuntimeBundleObjectRequest) ([]byte, error) {
 		object, ok := objects[request.Name]
@@ -376,6 +465,15 @@ func managedRuntimeTestSource(objects map[string][]byte) ManagedRuntimeBundleObj
 		}
 		return bytes.Clone(object), nil
 	})
+}
+
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 0
+	}
+	return len(p), nil
 }
 
 func realManagedRuntimeTestDir(t *testing.T) string {

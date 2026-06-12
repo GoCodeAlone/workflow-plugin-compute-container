@@ -25,6 +25,7 @@ import (
 
 const managedRuntimeInstallManifestName = "wfcompute-managed-runtime-install.json"
 const defaultManagedRuntimeHTTPTimeout = 30 * time.Second
+const defaultManagedRuntimeHTTPMaxBytes = 512 << 20
 
 type ManagedRuntimeLifecycleStatus string
 
@@ -95,7 +96,15 @@ func (s HTTPManagedRuntimeBundleObjectSource) FetchManagedRuntimeBundleObject(ct
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("fetch managed runtime object %q: %s", request.Name, resp.Status)
 	}
-	return io.ReadAll(resp.Body)
+	limited := io.LimitReader(resp.Body, defaultManagedRuntimeHTTPMaxBytes+1)
+	content, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(content)) > defaultManagedRuntimeHTTPMaxBytes {
+		return nil, fmt.Errorf("managed runtime object %q is too large", request.Name)
+	}
+	return content, nil
 }
 
 func (s HTTPManagedRuntimeBundleObjectSource) httpClient() *http.Client {
@@ -240,6 +249,7 @@ func (i ManagedRuntimeBundleInstaller) Install(ctx context.Context, request Mana
 		TrustRootDigest:         bundle.TrustRootDigest,
 		ScopedStoreEnforced:     bundle.ScopedStore.Required,
 		HostGlobalStoreExcluded: bundle.ScopedStore.HostGlobalVisibilityForbidden,
+		FileDigests:             fileDigests,
 		InstalledAt:             now,
 	}
 	manifest := managedRuntimeInstallManifest{
@@ -364,6 +374,9 @@ func (i ManagedRuntimeBundleInstaller) Uninstall(ctx context.Context, request Ma
 	_, statErr := os.Stat(bundleRoot)
 	removed := false
 	if statErr == nil {
+		if err := i.validateManagedRuntimeManifestForRemoval(bundleRoot, request.BundleID); err != nil {
+			return ManagedRuntimeUninstallResult{}, err
+		}
 		if err := os.RemoveAll(bundleRoot); err != nil {
 			return ManagedRuntimeUninstallResult{}, err
 		}
@@ -381,6 +394,16 @@ func (i ManagedRuntimeBundleInstaller) Uninstall(ctx context.Context, request Ma
 }
 
 func (i ManagedRuntimeBundleInstaller) Reinstall(ctx context.Context, request ManagedRuntimeInstallRequest) (ManagedRuntimeReinstallResult, error) {
+	_, bundleRoot, err := managedRuntimeBundleRoot(i.InstallRoot, request.BundleID)
+	if err != nil {
+		return ManagedRuntimeReinstallResult{}, err
+	}
+	replaced := false
+	if _, err := os.Stat(bundleRoot); err == nil {
+		replaced = true
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return ManagedRuntimeReinstallResult{}, err
+	}
 	install, err := i.Install(ctx, request)
 	if err != nil {
 		return ManagedRuntimeReinstallResult{}, err
@@ -397,13 +420,25 @@ func (i ManagedRuntimeBundleInstaller) Reinstall(ctx context.Context, request Ma
 		Uninstall: ManagedRuntimeUninstallResult{
 			BundleID:     request.BundleID,
 			Root:         install.Root,
-			Removed:      true,
+			Removed:      replaced,
 			ScopedOnly:   true,
 			ManifestPath: install.ManifestPath,
 		},
 		Install: install,
 		Doctor:  doctor,
 	}, nil
+}
+
+func (i ManagedRuntimeBundleInstaller) validateManagedRuntimeManifestForRemoval(bundleRoot, bundleID string) error {
+	manifestPath := filepath.Join(bundleRoot, managedRuntimeInstallManifestName)
+	manifest, err := readManagedRuntimeManifest(manifestPath)
+	if err != nil {
+		return fmt.Errorf("managed runtime install manifest is required before uninstall: %w", err)
+	}
+	if manifest.BundleID != bundleID || manifest.Root != bundleRoot || manifest.CommandPath != filepath.Join(bundleRoot, "bin", "nerdctl") {
+		return errors.New("managed runtime install manifest does not match scoped bundle root")
+	}
+	return nil
 }
 
 func (i ManagedRuntimeBundleInstaller) fetchPinnedObjects(ctx context.Context, source ManagedRuntimeBundleObjectSource, bundle core.ManagedRuntimeBundleDescriptor) ([]byte, []byte, []byte, []byte, error) {
