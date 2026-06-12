@@ -271,8 +271,18 @@ func TestManagedRuntimeBundleInstallerDoctorRejectsCommandSymlink(t *testing.T) 
 	if err != nil {
 		t.Fatalf("doctor managed runtime bundle: %v", err)
 	}
-	if doctor.Status == ManagedRuntimeLifecycleStatusOK || !strings.Contains(doctor.Reason, "symlink") {
+	if doctor.Status != ManagedRuntimeLifecycleStatusDegraded || !strings.Contains(doctor.Reason, "symlink") {
 		t.Fatalf("doctor = %#v, want degraded symlink result", doctor)
+	}
+}
+
+func TestHTTPManagedRuntimeBundleObjectSourceDefaultClientHasTimeout(t *testing.T) {
+	source := HTTPManagedRuntimeBundleObjectSource{}
+
+	client := source.httpClient()
+
+	if client.Timeout <= 0 {
+		t.Fatalf("default managed runtime HTTP client timeout = %s, want positive timeout", client.Timeout)
 	}
 }
 

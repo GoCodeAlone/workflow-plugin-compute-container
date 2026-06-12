@@ -23,6 +23,7 @@ import (
 )
 
 const managedRuntimeInstallManifestName = "wfcompute-managed-runtime-install.json"
+const defaultManagedRuntimeHTTPTimeout = 30 * time.Second
 
 type ManagedRuntimeLifecycleStatus string
 
@@ -81,15 +82,11 @@ func (s HTTPManagedRuntimeBundleObjectSource) FetchManagedRuntimeBundleObject(ct
 	if strings.TrimSpace(request.URL) == "" {
 		return nil, errors.New("managed runtime object URL is required")
 	}
-	client := s.Client
-	if client == nil {
-		client = http.DefaultClient
-	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, request.URL, nil)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := client.Do(httpReq)
+	resp, err := s.httpClient().Do(httpReq)
 	if err != nil {
 		return nil, err
 	}
@@ -98,6 +95,13 @@ func (s HTTPManagedRuntimeBundleObjectSource) FetchManagedRuntimeBundleObject(ct
 		return nil, fmt.Errorf("fetch managed runtime object %q: %s", request.Name, resp.Status)
 	}
 	return io.ReadAll(resp.Body)
+}
+
+func (s HTTPManagedRuntimeBundleObjectSource) httpClient() *http.Client {
+	if s.Client != nil {
+		return s.Client
+	}
+	return &http.Client{Timeout: defaultManagedRuntimeHTTPTimeout}
 }
 
 type ManagedRuntimeInstallResult struct {
@@ -326,7 +330,11 @@ func (i ManagedRuntimeBundleInstaller) Doctor(ctx context.Context, request Manag
 		return result, nil
 	}
 	if err := managedRuntimeRequireFileUnderRoot(bundleRoot, result.CommandPath); err != nil {
-		result.Status = ManagedRuntimeLifecycleStatusMissing
+		if errors.Is(err, os.ErrNotExist) {
+			result.Status = ManagedRuntimeLifecycleStatusMissing
+		} else {
+			result.Status = ManagedRuntimeLifecycleStatusDegraded
+		}
 		result.Reason = err.Error()
 		return result, nil
 	}
@@ -782,12 +790,8 @@ func extractManagedRuntimeTarGzip(content []byte, dest string) error {
 		if err != nil {
 			return err
 		}
-		name, err := cleanManagedRuntimeArchivePath(header.Name)
+		target, err := managedRuntimeArchiveTarget(dest, header.Name)
 		if err != nil {
-			return err
-		}
-		target := filepath.Join(dest, filepath.FromSlash(name))
-		if err := managedRuntimeRequirePathUnderRoot(dest, target); err != nil {
 			return err
 		}
 		switch header.Typeflag {
@@ -821,7 +825,7 @@ func extractManagedRuntimeTarGzip(content []byte, dest string) error {
 	}
 }
 
-func cleanManagedRuntimeArchivePath(name string) (string, error) {
+func managedRuntimeArchiveTarget(dest, name string) (string, error) {
 	if strings.TrimSpace(name) == "" || strings.Contains(name, "\\") || path.IsAbs(name) {
 		return "", fmt.Errorf("unsafe archive path %q", name)
 	}
@@ -829,7 +833,18 @@ func cleanManagedRuntimeArchivePath(name string) (string, error) {
 	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
 		return "", fmt.Errorf("unsafe archive path %q", name)
 	}
-	return clean, nil
+	local, err := filepath.Localize(clean)
+	if err != nil {
+		return "", fmt.Errorf("unsafe archive path %q: %w", name, err)
+	}
+	if !filepath.IsLocal(local) {
+		return "", fmt.Errorf("unsafe archive path %q", name)
+	}
+	target := filepath.Join(dest, local)
+	if err := managedRuntimeRequirePathUnderRoot(dest, target); err != nil {
+		return "", err
+	}
+	return target, nil
 }
 
 func modePerm(mode os.FileMode) os.FileMode {
