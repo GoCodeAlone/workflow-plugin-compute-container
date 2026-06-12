@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path"
@@ -781,6 +782,11 @@ func extractManagedRuntimeTarGzip(content []byte, dest string) error {
 		return err
 	}
 	defer gz.Close()
+	root, err := os.OpenRoot(dest)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
 	tr := tar.NewReader(gz)
 	for {
 		header, err := tr.Next()
@@ -790,24 +796,24 @@ func extractManagedRuntimeTarGzip(content []byte, dest string) error {
 		if err != nil {
 			return err
 		}
-		target, err := managedRuntimeArchiveTarget(dest, header.Name)
+		name, err := managedRuntimeArchiveLocalPath(header.Name)
 		if err != nil {
 			return err
 		}
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, modePerm(header.FileInfo().Mode())|0o700); err != nil {
+			if err := root.MkdirAll(name, modePerm(header.FileInfo().Mode())|0o700); err != nil {
 				return err
 			}
 		case tar.TypeReg, tar.TypeRegA:
-			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+			if err := root.MkdirAll(path.Dir(name), 0o700); err != nil {
 				return err
 			}
 			mode := modePerm(header.FileInfo().Mode())
 			if mode == 0 {
 				mode = 0o600
 			}
-			file, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+			file, err := root.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
 			if err != nil {
 				return err
 			}
@@ -825,7 +831,7 @@ func extractManagedRuntimeTarGzip(content []byte, dest string) error {
 	}
 }
 
-func managedRuntimeArchiveTarget(dest, name string) (string, error) {
+func managedRuntimeArchiveLocalPath(name string) (string, error) {
 	if strings.TrimSpace(name) == "" || strings.Contains(name, "\\") || path.IsAbs(name) {
 		return "", fmt.Errorf("unsafe archive path %q", name)
 	}
@@ -833,18 +839,10 @@ func managedRuntimeArchiveTarget(dest, name string) (string, error) {
 	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
 		return "", fmt.Errorf("unsafe archive path %q", name)
 	}
-	local, err := filepath.Localize(clean)
-	if err != nil {
-		return "", fmt.Errorf("unsafe archive path %q: %w", name, err)
-	}
-	if !filepath.IsLocal(local) {
+	if !fs.ValidPath(clean) {
 		return "", fmt.Errorf("unsafe archive path %q", name)
 	}
-	target := filepath.Join(dest, local)
-	if err := managedRuntimeRequirePathUnderRoot(dest, target); err != nil {
-		return "", err
-	}
-	return target, nil
+	return clean, nil
 }
 
 func modePerm(mode os.FileMode) os.FileMode {
