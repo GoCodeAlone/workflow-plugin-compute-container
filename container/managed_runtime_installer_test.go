@@ -441,6 +441,40 @@ func TestManagedRuntimeBundleInstallerUninstallRejectsUnmanagedDirectory(t *test
 	}
 }
 
+func TestManagedRuntimeBundleInstallerInstallRejectsUnmanagedExistingDirectory(t *testing.T) {
+	ctx := context.Background()
+	catalog, objects := testManagedRuntimeCatalogAndObjects(t, map[string]string{
+		"bin/nerdctl": "#!/bin/sh\nprintf nerdctl-test\n",
+	})
+	installRoot := realManagedRuntimeTestDir(t)
+	unmanaged := filepath.Join(installRoot, catalog.Bundles[0].BundleID)
+	if err := os.MkdirAll(unmanaged, 0o700); err != nil {
+		t.Fatalf("write unmanaged root: %v", err)
+	}
+	sentinel := filepath.Join(unmanaged, "sentinel.txt")
+	if err := os.WriteFile(sentinel, []byte("keep"), 0o600); err != nil {
+		t.Fatalf("write unmanaged sentinel: %v", err)
+	}
+	installer := ManagedRuntimeBundleInstaller{
+		Catalog:     catalog,
+		InstallRoot: installRoot,
+		Source:      managedRuntimeTestSource(objects),
+		Now:         func() time.Time { return catalog.GeneratedAt },
+	}
+
+	_, err := installer.Install(ctx, ManagedRuntimeInstallRequest{
+		BundleID:   catalog.Bundles[0].BundleID,
+		TargetOS:   "linux",
+		TargetArch: "amd64",
+	})
+	if err == nil || !strings.Contains(err.Error(), "install manifest") {
+		t.Fatalf("install error = %v, want unmanaged manifest failure", err)
+	}
+	if _, statErr := os.Stat(sentinel); statErr != nil {
+		t.Fatalf("unmanaged sentinel removed: %v", statErr)
+	}
+}
+
 func TestHTTPManagedRuntimeBundleObjectSourceRejectsOversizedObject(t *testing.T) {
 	source := HTTPManagedRuntimeBundleObjectSource{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

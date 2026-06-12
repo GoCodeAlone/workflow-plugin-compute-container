@@ -198,6 +198,9 @@ func (i ManagedRuntimeBundleInstaller) Install(ctx context.Context, request Mana
 		return ManagedRuntimeInstallResult{}, err
 	}
 	defer unlock()
+	if err := i.validateManagedRuntimeExistingRootForReplacement(bundleRoot, bundle.BundleID); err != nil {
+		return ManagedRuntimeInstallResult{}, err
+	}
 	source := i.source()
 	artifact, checksum, signature, trustRoot, err := i.fetchPinnedObjects(ctx, source, bundle)
 	if err != nil {
@@ -437,6 +440,20 @@ func (i ManagedRuntimeBundleInstaller) validateManagedRuntimeManifestForRemoval(
 	}
 	if manifest.BundleID != bundleID || manifest.Root != bundleRoot || manifest.CommandPath != filepath.Join(bundleRoot, "bin", "nerdctl") {
 		return errors.New("managed runtime install manifest does not match scoped bundle root")
+	}
+	return nil
+}
+
+func (i ManagedRuntimeBundleInstaller) validateManagedRuntimeExistingRootForReplacement(bundleRoot, bundleID string) error {
+	_, err := os.Stat(bundleRoot)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if err := i.validateManagedRuntimeManifestForRemoval(bundleRoot, bundleID); err != nil {
+		return fmt.Errorf("managed runtime install manifest is required before replacement: %w", err)
 	}
 	return nil
 }
