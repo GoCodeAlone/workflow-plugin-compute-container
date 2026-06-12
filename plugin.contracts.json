@@ -1,6 +1,30 @@
 {
   "version": "1",
-  "contracts": [],
+  "contracts": [
+    {
+      "name": "ManagedRuntimeBundleInstaller",
+      "wire": "json",
+      "goType": "github.com/GoCodeAlone/workflow-plugin-compute-container/container.ManagedRuntimeBundleInstaller",
+      "commands": [
+        "managed-runtime install",
+        "managed-runtime doctor",
+        "managed-runtime uninstall",
+        "managed-runtime reinstall"
+      ],
+      "produces": [
+        "ManagedRuntimeInstallResult",
+        "ManagedRuntimeDoctorResult",
+        "ManagedRuntimeUninstallResult",
+        "ManagedRuntimeReinstallResult"
+      ],
+      "guarantees": [
+        "scoped-install-root",
+        "pinned-artifact-checksum-signature-digests",
+        "safe-tar-gzip-extraction",
+        "scoped-uninstall-only"
+      ]
+    }
+  ],
   "protocolTypes": [
     {
       "name": "RuntimeBackendReport",

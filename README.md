@@ -45,9 +45,16 @@ host's default container namespace.
 
 Managed runtime release packaging verifies the upstream `SHA256SUMS` and
 `SHA256SUMS.asc` digests and emits a source manifest in the plugin release
-archive. Agent-side download, extraction, signature verification, and lifecycle
-wiring are intentionally left to the workflow-compute host integration phase so
-the plugin does not advertise a host-installed `nerdctl` as bundled.
+archive. The public `ManagedRuntimeBundleInstaller` helper and
+`managed-runtime` subcommands provide the reusable agent-side lifecycle contract:
+download pinned artifact/checksum/signature objects from catalog metadata,
+verify the detached OpenPGP signature against the catalog-pinned trust root,
+extract the bundle into an agent-owned scoped install root, write an install
+manifest with extracted file digests, doctor the scoped install, remove only the
+scoped bundle root, and reinstall from the same pinned metadata without removing
+the old install before the replacement has been staged. Workflow Compute hosts
+consume this contract instead of implementing private host-only bundle lifecycle
+behavior.
 
 The default conformance image reference is the Debian 13 distroless static index:
 
@@ -76,4 +83,22 @@ Run installed runtime smoke probes explicitly:
 
 ```sh
 WORKFLOW_COMPUTE_RUNTIME_PROBE_REAL=1 GOWORK=off go test ./container -run TestDockerCompatibleRuntimeProbeRealBackends -count=1 -v
+```
+
+Install and verify a managed bundle from catalog metadata:
+
+```sh
+workflow-plugin-compute-container managed-runtime install \
+  --catalog managed-runtime-bundles.json \
+  --install-root "$HOME/.local/share/workflow-compute/managed-runtime" \
+  --bundle-id managed-containerd-linux-amd64 \
+  --target-os linux \
+  --target-arch amd64
+
+workflow-plugin-compute-container managed-runtime doctor \
+  --catalog managed-runtime-bundles.json \
+  --install-root "$HOME/.local/share/workflow-compute/managed-runtime" \
+  --bundle-id managed-containerd-linux-amd64 \
+  --target-os linux \
+  --target-arch amd64
 ```
