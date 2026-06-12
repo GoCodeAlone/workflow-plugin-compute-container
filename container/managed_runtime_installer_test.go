@@ -370,6 +370,47 @@ func TestManagedRuntimeBundleInstallerDoctorRejectsCommandSymlink(t *testing.T) 
 	}
 }
 
+func TestManagedRuntimeBundleInstallerDoctorRejectsTamperedSymlinkSpelling(t *testing.T) {
+	ctx := context.Background()
+	catalog, objects := testManagedRuntimeCatalogAndObjects(t, map[string]string{
+		"bin/nerdctl": "#!/bin/sh\nprintf nerdctl-test\n",
+		"bin/helper":  "SYMLINK:nerdctl",
+	})
+	installer := ManagedRuntimeBundleInstaller{
+		Catalog:     catalog,
+		InstallRoot: realManagedRuntimeTestDir(t),
+		Source:      managedRuntimeTestSource(objects),
+		Now:         func() time.Time { return catalog.GeneratedAt },
+	}
+	installed, err := installer.Install(ctx, ManagedRuntimeInstallRequest{
+		BundleID:   catalog.Bundles[0].BundleID,
+		TargetOS:   "linux",
+		TargetArch: "amd64",
+	})
+	if err != nil {
+		t.Fatalf("install managed runtime bundle: %v", err)
+	}
+	helperPath := filepath.Join(installed.Root, "bin", "helper")
+	if err := os.Remove(helperPath); err != nil {
+		t.Fatalf("remove helper symlink: %v", err)
+	}
+	if err := os.Symlink("./nerdctl", helperPath); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	doctor, err := installer.Doctor(ctx, ManagedRuntimeDoctorRequest{
+		BundleID:   catalog.Bundles[0].BundleID,
+		TargetOS:   "linux",
+		TargetArch: "amd64",
+	})
+	if err != nil {
+		t.Fatalf("doctor managed runtime bundle: %v", err)
+	}
+	if doctor.Status == ManagedRuntimeLifecycleStatusOK || !strings.Contains(doctor.Reason, "file digest") {
+		t.Fatalf("doctor = %#v, want file digest degradation", doctor)
+	}
+}
+
 func TestHTTPManagedRuntimeBundleObjectSourceDefaultClientAllowsLargeArtifactDownloads(t *testing.T) {
 	source := HTTPManagedRuntimeBundleObjectSource{}
 

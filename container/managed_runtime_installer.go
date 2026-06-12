@@ -765,11 +765,10 @@ func managedRuntimeFileDigests(root, skipRel string) (map[string]string, error) 
 			if err != nil {
 				return err
 			}
-			digestTarget, err := managedRuntimeSymlinkDigestTarget(rel, target)
-			if err != nil {
+			if _, err := managedRuntimeSymlinkDigestTarget(rel, target); err != nil {
 				return err
 			}
-			out[rel] = "sha256:" + managedRuntimeDigestHex([]byte("symlink:"+digestTarget))
+			out[rel] = "sha256:" + managedRuntimeDigestHex([]byte("symlink:"+target))
 			return nil
 		}
 		if !info.Mode().IsRegular() {
