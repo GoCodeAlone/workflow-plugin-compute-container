@@ -42,7 +42,10 @@ type dockerRunSpec struct {
 
 func (r DockerSandboxRuntime) Available(ctx context.Context) error {
 	tool := firstNonEmpty(r.Tool, "docker")
-	out, _, err := r.commandRunner().CombinedOutput(ctx, nil, tool, "version")
+	out, stderr, err := r.commandRunner().CombinedOutput(ctx, nil, tool, "version")
+	if err != nil && len(stderr) > 0 {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(stderr)))
+	}
 	if err != nil && len(out) > 0 {
 		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
 	}

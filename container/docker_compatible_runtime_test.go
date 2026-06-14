@@ -479,6 +479,19 @@ func TestDockerCompatibleRuntimeReturnsExitCode(t *testing.T) {
 	}
 }
 
+func TestDockerCompatibleRuntimeAvailableIncludesStderr(t *testing.T) {
+	err := (DockerSandboxRuntime{Runner: fakeDockerCommandRunner{
+		stderr: []byte("Cannot connect to runtime socket"),
+		err:    fakeExitError(125),
+	}}).Available(t.Context())
+	if err == nil {
+		t.Fatal("expected availability error")
+	}
+	if !strings.Contains(err.Error(), "Cannot connect to runtime socket") {
+		t.Fatalf("availability error omitted stderr: %v", err)
+	}
+}
+
 type fakeDockerCommandRunner struct {
 	stdout []byte
 	stderr []byte
