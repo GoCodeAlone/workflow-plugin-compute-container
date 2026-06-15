@@ -60,6 +60,13 @@ func (r DockerSandboxRuntime) Run(ctx context.Context, req SandboxRunRequest) (S
 		return SandboxRunResult{}, err
 	}
 	defer cleanup()
+	if len(spec.RuntimeArgs) > 0 {
+		runtimeScope, err := validateRuntimeScope(spec.Tool, ContainerRuntimeScope{Args: spec.RuntimeArgs})
+		if err != nil {
+			return SandboxRunResult{}, err
+		}
+		spec.RuntimeArgs = runtimeScope.Args
+	}
 	stdout, stderr, err := r.commandRunner().CombinedOutput(ctx, req.Stdin, spec.Tool, spec.CommandArgs()...)
 	exitCode := 0
 	if err != nil {
@@ -435,9 +442,17 @@ func validateRuntimeScope(tool string, scope ContainerRuntimeScope) (ContainerRu
 	if len(scope.Args) == 0 {
 		return ContainerRuntimeScope{}, nil
 	}
-	if tool != "nerdctl" {
-		return ContainerRuntimeScope{}, errors.New("runtime scope args are only supported for nerdctl")
+	switch tool {
+	case "nerdctl":
+		return validateNerdctlRuntimeScope(scope)
+	case "podman":
+		return validatePodmanRuntimeScope(scope)
+	default:
+		return ContainerRuntimeScope{}, errors.New("runtime scope args are only supported for podman or nerdctl")
 	}
+}
+
+func validateNerdctlRuntimeScope(scope ContainerRuntimeScope) (ContainerRuntimeScope, error) {
 	if len(scope.Args) != 2 || scope.Args[0] != "--namespace" || strings.TrimSpace(scope.Args[1]) == "" {
 		return ContainerRuntimeScope{}, errors.New("runtime scope must be --namespace <name>")
 	}
@@ -446,6 +461,97 @@ func validateRuntimeScope(tool string, scope ContainerRuntimeScope) (ContainerRu
 		return ContainerRuntimeScope{}, errors.New("runtime scope namespace is invalid")
 	}
 	return cloneContainerRuntimeScope(scope), nil
+}
+
+func validatePodmanRuntimeScope(scope ContainerRuntimeScope) (ContainerRuntimeScope, error) {
+	if len(scope.Args) != 4 || scope.Args[0] != "--root" || scope.Args[2] != "--runroot" {
+		return ContainerRuntimeScope{}, errors.New("podman runtime scope must be --root <path> --runroot <path>")
+	}
+	root, err := validatePodmanRuntimeScopePath(scope.Args[1], "root")
+	if err != nil {
+		return ContainerRuntimeScope{}, fmt.Errorf("podman runtime scope root: %w", err)
+	}
+	runroot, err := validatePodmanRuntimeScopePath(scope.Args[3], "runroot")
+	if err != nil {
+		return ContainerRuntimeScope{}, fmt.Errorf("podman runtime scope runroot: %w", err)
+	}
+	if root == runroot {
+		return ContainerRuntimeScope{}, errors.New("podman runtime scope root and runroot must differ")
+	}
+	if filepath.Dir(root) != filepath.Dir(runroot) {
+		return ContainerRuntimeScope{}, errors.New("podman runtime scope root and runroot must share a private parent")
+	}
+	return ContainerRuntimeScope{Args: []string{"--root", root, "--runroot", runroot}}, nil
+}
+
+func validatePodmanRuntimeScopePath(value, name string) (string, error) {
+	if strings.TrimSpace(value) == "" || strings.ContainsAny(value, "\x00\r\n") || strings.HasPrefix(value, "-") {
+		return "", errors.New("path is invalid")
+	}
+	if !filepath.IsAbs(value) || filepath.Clean(value) != value {
+		return "", errors.New("path must be absolute and clean")
+	}
+	resolved, err := filepath.EvalSymlinks(value)
+	if err != nil {
+		return "", err
+	}
+	resolved = filepath.Clean(resolved)
+	if filepath.Base(resolved) != name {
+		return "", fmt.Errorf("path %q must end in %q", value, name)
+	}
+	parent := filepath.Dir(resolved)
+	if !validPodmanRuntimeScopeParent(filepath.Base(parent)) {
+		return "", fmt.Errorf("path %q must be under a wfcompute-podman-scope private parent", value)
+	}
+	parentInfo, err := os.Stat(parent)
+	if err != nil {
+		return "", err
+	}
+	if !parentInfo.IsDir() {
+		return "", fmt.Errorf("parent path %q is not a directory", parent)
+	}
+	if parentInfo.Mode().Perm() != 0o700 {
+		return "", fmt.Errorf("parent path %q must have mode 0700", parent)
+	}
+	if err := validatePodmanRuntimeScopeOwner(parent, parentInfo); err != nil {
+		return "", err
+	}
+	if err := rejectSymlinkPathComponents(filepath.Dir(value), value); err != nil {
+		return "", err
+	}
+	info, err := os.Stat(value)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("path %q is not a directory", value)
+	}
+	if info.Mode().Perm() != 0o700 {
+		return "", fmt.Errorf("path %q must have mode 0700", value)
+	}
+	if err := validatePodmanRuntimeScopeOwner(resolved, info); err != nil {
+		return "", err
+	}
+	return resolved, nil
+}
+
+func validPodmanRuntimeScopeParent(name string) bool {
+	const prefix = "wfcompute-podman-scope-"
+	suffix, ok := strings.CutPrefix(name, prefix)
+	if !ok || len(suffix) < 8 {
+		return false
+	}
+	for _, r := range suffix {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '-' || r == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func sandboxWorkingDir(value string) (string, error) {
