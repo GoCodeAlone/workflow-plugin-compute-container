@@ -501,7 +501,7 @@ func validatePodmanRuntimeScopePath(value, name string) (string, error) {
 	}
 	parent := filepath.Dir(resolved)
 	if !validPodmanRuntimeScopeParent(filepath.Base(parent)) {
-		return "", fmt.Errorf("path %q must be under a wfcompute-podman-scope private parent", value)
+		return "", fmt.Errorf("path %q must be under a wfcompute-podman-scope-* or wfcps-* private parent", value)
 	}
 	parentInfo, err := os.Stat(parent)
 	if err != nil {
@@ -536,9 +536,17 @@ func validatePodmanRuntimeScopePath(value, name string) (string, error) {
 }
 
 func validPodmanRuntimeScopeParent(name string) bool {
-	const prefix = "wfcompute-podman-scope-"
-	suffix, ok := strings.CutPrefix(name, prefix)
-	if !ok || len(suffix) < 8 {
+	for _, prefix := range []string{"wfcompute-podman-scope-", "wfcps-"} {
+		suffix, ok := strings.CutPrefix(name, prefix)
+		if ok && validPodmanRuntimeScopeParentSuffix(suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func validPodmanRuntimeScopeParentSuffix(suffix string) bool {
+	if len(suffix) < 8 {
 		return false
 	}
 	for _, r := range suffix {

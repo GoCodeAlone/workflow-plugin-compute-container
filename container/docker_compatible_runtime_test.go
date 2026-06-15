@@ -418,6 +418,26 @@ func TestPodmanSandboxRuntimePrefixesScopedRuntimeArgs(t *testing.T) {
 	}
 }
 
+func TestPodmanSandboxRuntimeAcceptsShortScopedStorePrefix(t *testing.T) {
+	scope, wantScope := podmanScopeWithParent(t, "wfcps-valid-0001")
+	spec, cleanup, err := (DockerSandboxRuntime{Tool: "podman"}).prepareRun(SandboxRunRequest{
+		Image:        "localhost/private-provider:v1",
+		Command:      []string{"run"},
+		RuntimeScope: scope,
+		Workspace:    t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("prepare run: %v", err)
+	}
+	defer cleanup()
+	if !slices.Equal(spec.RuntimeArgs, wantScope.Args) {
+		t.Fatalf("runtime args = %+v want %+v", spec.RuntimeArgs, wantScope.Args)
+	}
+	if got := len(filepath.Join("/private/tmp", "wfcps-"+strings.Repeat("0", 14), "runroot")); got > 50 {
+		t.Fatalf("short scoped store canonical runroot length = %d want <= 50", got)
+	}
+}
+
 func TestPodmanSandboxRuntimeRunPrefixesScopedRuntimeArgs(t *testing.T) {
 	scope, wantScope := podmanScope(t)
 	runner := &captureDockerCommandRunner{}
@@ -474,6 +494,11 @@ func TestDockerCompatibleRuntimeRejectsUnsafeRuntimeScopeArgs(t *testing.T) {
 	if err := os.Mkdir(weakSuffixRunroot, 0o700); err != nil {
 		t.Fatalf("create weak suffix runroot: %v", err)
 	}
+	weakShortSuffixRoot := podmanScopePath(t, "wfcps-weak", "root")
+	weakShortSuffixRunroot := filepath.Join(filepath.Dir(weakShortSuffixRoot), "runroot")
+	if err := os.Mkdir(weakShortSuffixRunroot, 0o700); err != nil {
+		t.Fatalf("create weak short suffix runroot: %v", err)
+	}
 	nonPrefixedParent := filepath.Join(t.TempDir(), "podman-scope-no-prefix")
 	if err := os.Mkdir(nonPrefixedParent, 0o700); err != nil {
 		t.Fatalf("create non-prefixed parent: %v", err)
@@ -499,6 +524,7 @@ func TestDockerCompatibleRuntimeRejectsUnsafeRuntimeScopeArgs(t *testing.T) {
 		{name: "wrong runroot basename", scope: ContainerRuntimeScope{Args: []string{"--root", podmanScopeDir(t, "wrong-name", "root"), "--runroot", wrongRunrootName}}},
 		{name: "missing private parent prefix", scope: ContainerRuntimeScope{Args: []string{"--root", nonPrefixedRoot, "--runroot", nonPrefixedRunroot}}},
 		{name: "weak private parent suffix", scope: ContainerRuntimeScope{Args: []string{"--root", weakSuffixRoot, "--runroot", weakSuffixRunroot}}},
+		{name: "weak short private parent suffix", scope: ContainerRuntimeScope{Args: []string{"--root", weakShortSuffixRoot, "--runroot", weakShortSuffixRunroot}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -615,7 +641,12 @@ func TestPodmanRuntimeScopeAcceptsSymlinkedTempRootAlias(t *testing.T) {
 
 func podmanScope(t *testing.T) (ContainerRuntimeScope, ContainerRuntimeScope) {
 	t.Helper()
-	parent := filepath.Join(t.TempDir(), "wfcompute-podman-scope-valid-0001")
+	return podmanScopeWithParent(t, "wfcompute-podman-scope-valid-0001")
+}
+
+func podmanScopeWithParent(t *testing.T, parentName string) (ContainerRuntimeScope, ContainerRuntimeScope) {
+	t.Helper()
+	parent := filepath.Join(t.TempDir(), parentName)
 	if err := os.Mkdir(parent, 0o700); err != nil {
 		t.Fatalf("create podman scope parent: %v", err)
 	}
@@ -633,7 +664,12 @@ func podmanScope(t *testing.T) (ContainerRuntimeScope, ContainerRuntimeScope) {
 
 func podmanScopeDir(t *testing.T, parentName, childName string) string {
 	t.Helper()
-	parent := filepath.Join(t.TempDir(), "wfcompute-podman-scope-"+parentName)
+	return podmanScopePath(t, "wfcompute-podman-scope-"+parentName, childName)
+}
+
+func podmanScopePath(t *testing.T, parentName, childName string) string {
+	t.Helper()
+	parent := filepath.Join(t.TempDir(), parentName)
 	if err := os.Mkdir(parent, 0o700); err != nil {
 		t.Fatalf("create podman scope parent: %v", err)
 	}
