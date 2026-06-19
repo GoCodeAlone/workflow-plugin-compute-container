@@ -112,6 +112,12 @@ func (r DockerSandboxRuntime) prepareRun(req SandboxRunRequest) (dockerRunSpec, 
 			return dockerRunSpec{}, cleanup, err
 		}
 		cleanup = restore
+	} else if tool == "nerdctl" {
+		restore, err := makeWorkspaceSandboxWritable(workspace)
+		if err != nil {
+			return dockerRunSpec{}, cleanup, err
+		}
+		cleanup = restore
 	}
 	network := sandboxNetwork(req.Network)
 	if network == "" {
@@ -252,6 +258,18 @@ func makeWorkspaceSandboxReadable(workspace string) (func(), error) {
 	}, nil
 }
 
+func makeWorkspaceSandboxWritable(workspace string) (func(), error) {
+	original, err := chmodSandboxWritableDirs(workspace)
+	if err != nil {
+		return func() {}, err
+	}
+	return func() {
+		for i := len(original) - 1; i >= 0; i-- {
+			_ = os.Chmod(original[i].path, original[i].mode)
+		}
+	}, nil
+}
+
 type sandboxPathMode struct {
 	path string
 	mode os.FileMode
@@ -289,6 +307,35 @@ func chmodSandboxReadableTree(workspace string) ([]sandboxPathMode, error) {
 	return original, nil
 }
 
+func chmodSandboxWritableDirs(workspace string) ([]sandboxPathMode, error) {
+	var original []sandboxPathMode
+	err := filepath.WalkDir(workspace, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("stat sandbox workspace dir %s: %w", path, err)
+		}
+		mode := info.Mode().Perm()
+		original = append(original, sandboxPathMode{path: path, mode: mode})
+		if err := os.Chmod(path, dockerSandboxWritableDirMode(mode)); err != nil {
+			return fmt.Errorf("chmod sandbox workspace dir %s: %w", path, err)
+		}
+		return nil
+	})
+	if err != nil {
+		for i := len(original) - 1; i >= 0; i-- {
+			_ = os.Chmod(original[i].path, original[i].mode)
+		}
+		return nil, err
+	}
+	return original, nil
+}
+
 func dockerSandboxReadableDirMode(mode os.FileMode) os.FileMode {
 	return (mode | 0o755) & 0o777
 }
@@ -298,6 +345,10 @@ func dockerSandboxReadableFileMode(mode os.FileMode) os.FileMode {
 		return (mode | 0o755) & 0o777
 	}
 	return (mode | 0o644) & 0o777
+}
+
+func dockerSandboxWritableDirMode(mode os.FileMode) os.FileMode {
+	return (mode | 0o003) & 0o777
 }
 
 func joinCleanup(first func(), second func()) func() {
