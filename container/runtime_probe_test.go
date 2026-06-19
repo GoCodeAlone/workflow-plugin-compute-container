@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	core "github.com/GoCodeAlone/workflow-plugin-compute-core/protocol"
 )
@@ -92,6 +93,96 @@ func TestDockerCompatibleRuntimeProbeReportsDegradedWhenConformanceFails(t *test
 	}
 	if err := report.Validate(); err != nil {
 		t.Fatalf("degraded report invalid: %v", err)
+	}
+}
+
+func TestRuntimeBackendProbeIncludesSafeConformanceStderr(t *testing.T) {
+	probe := RuntimeBackendProbe{
+		Options: podmanProbeOptions([]core.RuntimeProfile{core.RuntimeProfileSandboxedOCI}),
+		Runner: &fakeRuntimeCommandRunner{
+			path: "/usr/bin/podman",
+			results: map[string]fakeRuntimeCommandResult{
+				"podman version --format {{.Client.Version}}": {stdout: "5.0.0\n"},
+				defaultRuntimeConformanceCommandKey("podman"): {
+					stderr: "exec /usr/local/bin/wfcompute-sandbox-probe: no such file or directory",
+					err:    errors.New("exit status 127"),
+				},
+			},
+		},
+	}
+
+	report := probe.Probe(context.Background())
+
+	if report.Status != core.RuntimeBackendDegraded {
+		t.Fatalf("status = %q, want degraded: %+v", report.Status, report)
+	}
+	if !strings.Contains(report.Reason, "exit status 127") ||
+		!strings.Contains(report.Reason, "wfcompute-sandbox-probe: no such file or directory") {
+		t.Fatalf("reason omitted safe stderr detail: %q", report.Reason)
+	}
+	if err := report.Validate(); err != nil {
+		t.Fatalf("degraded report invalid: %v", err)
+	}
+}
+
+func TestRuntimeBackendProbeBoundsConformanceStderr(t *testing.T) {
+	stderr := strings.Repeat("runtime detail ", 200) + "tail-marker"
+	probe := RuntimeBackendProbe{
+		Options: podmanProbeOptions([]core.RuntimeProfile{core.RuntimeProfileSandboxedOCI}),
+		Runner: &fakeRuntimeCommandRunner{
+			path: "/usr/bin/podman",
+			results: map[string]fakeRuntimeCommandResult{
+				"podman version --format {{.Client.Version}}": {stdout: "5.0.0\n"},
+				defaultRuntimeConformanceCommandKey("podman"): {
+					stderr: stderr,
+					err:    errors.New("exit status 127"),
+				},
+			},
+		},
+	}
+
+	report := probe.Probe(context.Background())
+
+	if report.Status != core.RuntimeBackendDegraded {
+		t.Fatalf("status = %q, want degraded: %+v", report.Status, report)
+	}
+	if len(report.Reason) > 900 {
+		t.Fatalf("reason length = %d, want bounded detail", len(report.Reason))
+	}
+	if strings.Contains(report.Reason, "tail-marker") {
+		t.Fatalf("reason included unbounded stderr tail: %q", report.Reason)
+	}
+	if !strings.Contains(report.Reason, "truncated") {
+		t.Fatalf("reason did not mark truncated stderr: %q", report.Reason)
+	}
+}
+
+func TestRuntimeBackendProbeKeepsTruncatedConformanceStderrUTF8Valid(t *testing.T) {
+	stderr := strings.Repeat("a", maxRuntimeProbeStderrRunes-1) + "界tail-marker"
+	probe := RuntimeBackendProbe{
+		Options: podmanProbeOptions([]core.RuntimeProfile{core.RuntimeProfileSandboxedOCI}),
+		Runner: &fakeRuntimeCommandRunner{
+			path: "/usr/bin/podman",
+			results: map[string]fakeRuntimeCommandResult{
+				"podman version --format {{.Client.Version}}": {stdout: "5.0.0\n"},
+				defaultRuntimeConformanceCommandKey("podman"): {
+					stderr: stderr,
+					err:    errors.New("exit status 127"),
+				},
+			},
+		},
+	}
+
+	report := probe.Probe(context.Background())
+
+	if report.Status != core.RuntimeBackendDegraded {
+		t.Fatalf("status = %q, want degraded: %+v", report.Status, report)
+	}
+	if !utf8.ValidString(report.Reason) {
+		t.Fatalf("reason is not valid UTF-8: %q", report.Reason)
+	}
+	if !strings.Contains(report.Reason, "truncated") {
+		t.Fatalf("reason did not mark truncated stderr: %q", report.Reason)
 	}
 }
 
@@ -595,6 +686,7 @@ type fakeRuntimeCommandRunner struct {
 
 type fakeRuntimeCommandResult struct {
 	stdout string
+	stderr string
 	err    error
 }
 
@@ -614,5 +706,5 @@ func (r *fakeRuntimeCommandRunner) Run(_ context.Context, name string, args ...s
 	if !ok {
 		return RuntimeCommandResult{}, errors.New("unexpected command: " + key)
 	}
-	return RuntimeCommandResult{Stdout: []byte(result.stdout)}, result.err
+	return RuntimeCommandResult{Stdout: []byte(result.stdout), Stderr: []byte(result.stderr)}, result.err
 }
