@@ -397,6 +397,83 @@ func TestNerdctlSandboxRuntimePrefixesScopedRuntimeArgs(t *testing.T) {
 	}
 }
 
+func TestNerdctlSandboxRuntimeMakesWorkspaceWritableForRootlessUserNamespace(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.Chmod(workspace, 0o700); err != nil {
+		t.Fatalf("chmod workspace: %v", err)
+	}
+	spec, cleanup, err := (DockerSandboxRuntime{Tool: "nerdctl"}).prepareRun(SandboxRunRequest{
+		Image:        "localhost/private-provider:v1",
+		RuntimeScope: ContainerRuntimeScope{Args: []string{"--namespace", "wfcompute-private-image"}},
+		Workspace:    workspace,
+	})
+	if err != nil {
+		t.Fatalf("prepare run: %v", err)
+	}
+	_ = spec
+	info, err := os.Stat(workspace)
+	if err != nil {
+		t.Fatalf("stat workspace after prepare: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o703 {
+		t.Fatalf("rootless nerdctl workspace mode after prepare: got %o want 703", got)
+	}
+	cleanup()
+	info, err = os.Stat(workspace)
+	if err != nil {
+		t.Fatalf("stat workspace after cleanup: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		t.Fatalf("rootless nerdctl workspace mode after cleanup: got %o want 700", got)
+	}
+}
+
+func TestNerdctlSandboxRuntimeRestoresWorkspaceWhenPrepareFails(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.Chmod(workspace, 0o700); err != nil {
+		t.Fatalf("chmod workspace: %v", err)
+	}
+	_, cleanup, err := (DockerSandboxRuntime{Tool: "nerdctl"}).prepareRun(SandboxRunRequest{
+		Image:        "localhost/private-provider:v1",
+		RuntimeScope: ContainerRuntimeScope{Args: []string{"--namespace"}},
+		Workspace:    workspace,
+	})
+	_ = cleanup
+	if err == nil {
+		t.Fatal("expected invalid runtime scope error")
+	}
+	info, statErr := os.Stat(workspace)
+	if statErr != nil {
+		t.Fatalf("stat workspace after failed prepare: %v", statErr)
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		t.Fatalf("failed prepare workspace mode: got %o want 700", got)
+	}
+}
+
+func TestDockerSandboxRuntimeKeepsNonRootWorkspacePrivate(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.Chmod(workspace, 0o700); err != nil {
+		t.Fatalf("chmod workspace: %v", err)
+	}
+	spec, cleanup, err := (DockerSandboxRuntime{Tool: "docker"}).prepareRun(SandboxRunRequest{
+		Image:     "localhost/provider:v1",
+		Workspace: workspace,
+	})
+	if err != nil {
+		t.Fatalf("prepare run: %v", err)
+	}
+	_ = spec
+	defer cleanup()
+	info, err := os.Stat(workspace)
+	if err != nil {
+		t.Fatalf("stat workspace after prepare: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		t.Fatalf("docker workspace mode after prepare: got %o want 700", got)
+	}
+}
+
 func TestPodmanSandboxRuntimePrefixesScopedRuntimeArgs(t *testing.T) {
 	scope, wantScope := podmanScope(t)
 	spec, cleanup, err := (DockerSandboxRuntime{Tool: "podman"}).prepareRun(SandboxRunRequest{
