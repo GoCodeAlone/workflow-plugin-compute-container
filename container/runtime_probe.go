@@ -23,6 +23,7 @@ const (
 	defaultConformanceProfile  = "distroless-static-v1"
 	defaultConformanceCommand  = "/usr/local/bin/wfcompute-sandbox-probe"
 	defaultConformanceImageRef = "gcr.io/distroless/static-debian13@sha256:3592aa8171c77482f62bbc4164e6a2d141c6122554ace66e5cc910cadb961ff0"
+	maxRuntimeProbeStderrRunes = 768
 )
 
 type RuntimeCommandResult struct {
@@ -314,7 +315,7 @@ func (p RuntimeBackendProbe) Probe(ctx context.Context) core.RuntimeBackendRepor
 	conformanceResult, err := runner.Run(ctx, opts.Command, conformanceArgs...)
 	if err != nil {
 		report.Status = core.RuntimeBackendDegraded
-		report.Reason = redactRuntimeProbeDetail(fmt.Sprintf("runtime conformance probe failed: %v", err))
+		report.Reason = redactRuntimeProbeDetail(runtimeProbeFailureDetail("runtime conformance probe failed", err, conformanceResult.Stderr))
 		return report
 	}
 	evidence, err := runtimeBackendConformanceEvidence(conformanceResult.Stdout, report)
@@ -517,6 +518,20 @@ func redactRuntimeProbeDetail(value string) string {
 		return "runtime probe failed"
 	}
 	return value
+}
+
+func runtimeProbeFailureDetail(prefix string, err error, stderr []byte) string {
+	detail := strings.TrimSpace(string(stderr))
+	if detail == "" {
+		return fmt.Sprintf("%s: %v", prefix, err)
+	}
+	detail = strings.ReplaceAll(detail, "\x00", "")
+	detail = strings.ReplaceAll(detail, "\n", " ")
+	detail = strings.ReplaceAll(detail, "\r", " ")
+	if runes := []rune(detail); len(runes) > maxRuntimeProbeStderrRunes {
+		detail = strings.TrimSpace(string(runes[:maxRuntimeProbeStderrRunes])) + " ... truncated"
+	}
+	return fmt.Sprintf("%s: %v: %s", prefix, err, detail)
 }
 
 func defaultRuntimeConformanceImage() string {
