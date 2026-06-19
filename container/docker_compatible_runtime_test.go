@@ -428,6 +428,25 @@ func TestNerdctlSandboxRuntimeMakesWorkspaceWritableForRootlessUserNamespace(t *
 	}
 }
 
+func TestNerdctlSandboxRuntimeUsesHostUserNamespaceForReadableArtifacts(t *testing.T) {
+	workspace := t.TempDir()
+	spec, cleanup, err := (DockerSandboxRuntime{Tool: "nerdctl"}).prepareRun(SandboxRunRequest{
+		Image:        "localhost/private-provider:v1",
+		RuntimeScope: ContainerRuntimeScope{Args: []string{"--namespace", "wfcompute-private-image"}},
+		Workspace:    workspace,
+	})
+	if err != nil {
+		t.Fatalf("prepare run: %v", err)
+	}
+	defer cleanup()
+	args := strings.Join(spec.Args, "\x00")
+	for _, want := range []string{"--userns\x00host", fmt.Sprintf("--user\x00%d:%d", os.Getuid(), os.Getgid())} {
+		if !strings.Contains(args, want) {
+			t.Fatalf("nerdctl args must preserve host user ownership for bind-mounted artifacts, missing %q in %q", want, args)
+		}
+	}
+}
+
 func TestNerdctlSandboxRuntimeRestoresWorkspaceWhenPrepareFails(t *testing.T) {
 	workspace := t.TempDir()
 	if err := os.Chmod(workspace, 0o700); err != nil {
@@ -471,6 +490,9 @@ func TestDockerSandboxRuntimeKeepsNonRootWorkspacePrivate(t *testing.T) {
 	}
 	if got := info.Mode().Perm(); got != 0o700 {
 		t.Fatalf("docker workspace mode after prepare: got %o want 700", got)
+	}
+	if strings.Contains(strings.Join(spec.Args, "\x00"), "--userns\x00host") {
+		t.Fatalf("docker sandbox must not use nerdctl user namespace override: %q", spec.Args)
 	}
 }
 
