@@ -155,6 +155,8 @@ func (r DockerSandboxRuntime) prepareRun(req SandboxRunRequest) (dockerRunSpec, 
 	if !req.RunAsRoot {
 		if tool == "podman" {
 			args = append(args, "--userns", "keep-id")
+		} else if tool == "nerdctl" {
+			args = append(args, "--userns", "host")
 		}
 		args = append(args, "--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()))
 	}
