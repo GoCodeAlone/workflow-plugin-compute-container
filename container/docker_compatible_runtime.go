@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -13,6 +15,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	core "github.com/GoCodeAlone/workflow-plugin-compute-core/protocol"
 )
@@ -34,10 +37,11 @@ func (ExecDockerCommandRunner) CombinedOutput(ctx context.Context, stdin []byte,
 }
 
 type dockerRunSpec struct {
-	Tool        string
-	RuntimeArgs []string
-	Args        []string
-	EnvFile     string
+	Tool          string
+	RuntimeArgs   []string
+	Args          []string
+	EnvFile       string
+	ContainerName string
 }
 
 func (r DockerSandboxRuntime) Available(ctx context.Context) error {
@@ -68,6 +72,9 @@ func (r DockerSandboxRuntime) Run(ctx context.Context, req SandboxRunRequest) (S
 		spec.RuntimeArgs = runtimeScope.Args
 	}
 	stdout, stderr, err := r.commandRunner().CombinedOutput(ctx, req.Stdin, spec.Tool, spec.CommandArgs()...)
+	if ctx.Err() != nil {
+		r.removeCanceledContainer(spec)
+	}
 	exitCode := 0
 	if err != nil {
 		exitCode = commandExitCode(err)
@@ -132,6 +139,12 @@ func (r DockerSandboxRuntime) prepareRun(req SandboxRunRequest) (dockerRunSpec, 
 		"--pids-limit", "256",
 		"--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=64m",
 	}
+	containerName, err := newSandboxContainerName()
+	if err != nil {
+		cleanup()
+		return dockerRunSpec{}, cleanup, err
+	}
+	args = append(args, "--name", containerName)
 	if len(req.Stdin) > 0 {
 		args = append(args, "-i")
 	}
@@ -210,7 +223,25 @@ func (r DockerSandboxRuntime) prepareRun(req SandboxRunRequest) (dockerRunSpec, 
 		cleanup()
 		return dockerRunSpec{}, cleanup, err
 	}
-	return dockerRunSpec{Tool: tool, RuntimeArgs: runtimeScope.Args, Args: args, EnvFile: envFile}, cleanup, nil
+	return dockerRunSpec{Tool: tool, RuntimeArgs: runtimeScope.Args, Args: args, EnvFile: envFile, ContainerName: containerName}, cleanup, nil
+}
+
+func (r DockerSandboxRuntime) removeCanceledContainer(spec dockerRunSpec) {
+	if spec.ContainerName == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	args := appendRuntimeScopeArgs(ContainerRuntimeScope{Args: spec.RuntimeArgs}, "rm", "-f", spec.ContainerName)
+	_, _, _ = r.commandRunner().CombinedOutput(ctx, nil, spec.Tool, args...)
+}
+
+func newSandboxContainerName() (string, error) {
+	var raw [8]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", fmt.Errorf("generate sandbox container name: %w", err)
+	}
+	return "wfcompute-sandbox-" + hex.EncodeToString(raw[:]), nil
 }
 
 func (s dockerRunSpec) CommandArgs() []string {
