@@ -856,6 +856,29 @@ func TestDockerCompatibleRuntimeReturnsExitCode(t *testing.T) {
 	}
 }
 
+func TestDockerCompatibleRuntimeRemovesNamedContainerOnContextCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	runner := &cancelingDockerCommandRunner{cancel: cancel}
+	_, err := (DockerSandboxRuntime{Runner: runner}).Run(ctx, SandboxRunRequest{
+		Image:     "image",
+		Command:   []string{"cmd"},
+		Workspace: t.TempDir(),
+	})
+	if err == nil {
+		t.Fatal("expected canceled runtime error")
+	}
+	if len(runner.calls) != 2 {
+		t.Fatalf("runtime calls = %d want run plus cleanup: %#v", len(runner.calls), runner.calls)
+	}
+	name := dockerArgValue(runner.calls[0], "--name")
+	if !strings.HasPrefix(name, "wfcompute-sandbox-") {
+		t.Fatalf("run args missing sandbox container name: %#v", runner.calls[0])
+	}
+	if !slices.Equal(runner.calls[1], []string{"rm", "-f", name}) {
+		t.Fatalf("cleanup args = %#v want rm -f %s", runner.calls[1], name)
+	}
+}
+
 func TestDockerCompatibleRuntimeAvailableIncludesStderr(t *testing.T) {
 	err := (DockerSandboxRuntime{Runner: fakeDockerCommandRunner{
 		stderr: []byte("Cannot connect to runtime socket"),
@@ -905,6 +928,30 @@ func (r *captureDockerCommandRunner) CombinedOutput(_ context.Context, _ []byte,
 	r.tool = name
 	r.args = append([]string(nil), args...)
 	return nil, nil, nil
+}
+
+type cancelingDockerCommandRunner struct {
+	cancel func()
+	calls  [][]string
+}
+
+func (r *cancelingDockerCommandRunner) CombinedOutput(ctx context.Context, _ []byte, _ string, args ...string) ([]byte, []byte, error) {
+	r.calls = append(r.calls, append([]string(nil), args...))
+	if len(r.calls) == 1 {
+		r.cancel()
+		<-ctx.Done()
+		return nil, nil, ctx.Err()
+	}
+	return nil, nil, nil
+}
+
+func dockerArgValue(args []string, key string) string {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == key {
+			return args[i+1]
+		}
+	}
+	return ""
 }
 
 type fakeExitError int
