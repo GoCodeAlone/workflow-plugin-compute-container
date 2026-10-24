@@ -575,7 +575,7 @@ func podmanProbeOptions(profiles []core.RuntimeProfile) RuntimeBackendProbeOptio
 }
 
 func defaultRuntimeConformanceCommandKey(tool string) string {
-	return tool + " run --rm --network none -v /tmp/wfcompute-runtime-probe-test:/workspace -w /workspace -e WFCOMPUTE_RUNTIME_PROBE=1 --read-only " + defaultConformanceImageRef + " " + defaultConformanceCommand
+	return tool + " run --rm --pull never --log-driver none --memory 67108864 --cpus 0.25 --pids-limit 64 --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m --cap-drop ALL --security-opt no-new-privileges --network none -v /tmp/wfcompute-runtime-probe-test:/workspace -w /workspace -e WFCOMPUTE_RUNTIME_PROBE=1 --read-only " + defaultConformanceImageRef + " " + defaultConformanceCommand
 }
 
 func validRuntimeEvidenceJSON() string {
@@ -654,7 +654,7 @@ func validManagedRuntimeBundleDescriptor() core.ManagedRuntimeBundleDescriptor {
 func managedRuntimeConformanceCommandKey(command string) string {
 	digest := digestForRuntimeClaim("managed-containerd-linux-amd64", "distroless-static-v1", "scope")
 	return command + " --namespace wfcompute-" + digest[7:23] +
-		" run --rm --network none -v /tmp/wfcompute-runtime-probe-test:/workspace -w /workspace -e WFCOMPUTE_RUNTIME_PROBE=1 --read-only " +
+		" run --rm --pull never --log-driver none --memory 67108864 --cpus 0.25 --pids-limit 64 --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m --cap-drop ALL --security-opt no-new-privileges --network none -v /tmp/wfcompute-runtime-probe-test:/workspace -w /workspace -e WFCOMPUTE_RUNTIME_PROBE=1 --read-only " +
 		defaultConformanceImageRef + " " + defaultConformanceCommand
 }
 
@@ -698,7 +698,15 @@ func (r *fakeRuntimeCommandRunner) LookPath(string) (string, error) {
 }
 
 func (r *fakeRuntimeCommandRunner) Run(_ context.Context, name string, args ...string) (RuntimeCommandResult, error) {
-	key := strings.Join(append([]string{name}, args...), " ")
+	normalized := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		if (args[i] == "--name" || args[i] == "--label") && i+1 < len(args) {
+			i++
+			continue
+		}
+		normalized = append(normalized, args[i])
+	}
+	key := strings.Join(append([]string{name}, normalized...), " ")
 	if r.calls != nil {
 		*r.calls = append(*r.calls, key)
 	}
