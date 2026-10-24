@@ -62,6 +62,7 @@ type SandboxRunRequest struct {
 	DataMounts                 []SandboxMount
 	Timeout                    time.Duration
 	Limits                     core.ResourceLimits
+	ReadOnlyWorkspace          bool
 }
 
 type SandboxRunResult struct {
@@ -70,6 +71,7 @@ type SandboxRunResult struct {
 	Stderr        []byte
 	ArtifactHash  string
 	ResourceUsage core.ResourceUsage
+	OutputCapture OutputCaptureMetadata
 }
 
 type SandboxRuntime interface {
@@ -104,7 +106,8 @@ type SandboxedCommandRuntime interface {
 }
 
 type SandboxRuntimeCommandAdapter struct {
-	Runtime SandboxRuntime
+	ReadOnlyWorkspace bool
+	Runtime           SandboxRuntime
 }
 
 type SandboxedContainerBuildRuntimeInvocation struct {
@@ -363,24 +366,38 @@ func (a SandboxRuntimeCommandAdapter) RunSandboxedCommand(ctx context.Context, i
 	if len(workload.Args) == 0 {
 		return core.RuntimeExecutionResult{}, errors.New("command args are required")
 	}
-	if err := a.Runtime.Available(ctx); err != nil {
-		return core.RuntimeExecutionResult{}, fmt.Errorf("sandbox runtime unavailable: %w", err)
-	}
 	timeout := defaultDuration(invocation.Timeout, time.Minute)
+	if invocation.Request.Limits.RuntimeSeconds > 0 && time.Duration(invocation.Request.Limits.RuntimeSeconds)*time.Second < timeout {
+		timeout = time.Duration(invocation.Request.Limits.RuntimeSeconds) * time.Second
+	}
 	timeoutLimitHit := firstNonEmpty(invocation.TimeoutLimitHit, "timeout")
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	readOnly := a.ReadOnlyWorkspace
+	switch native := a.Runtime.(type) {
+	case DockerSandboxRuntime:
+		readOnly = readOnly || native.ReadOnlyWorkspace
+	case *DockerSandboxRuntime:
+		readOnly = readOnly || (native != nil && native.ReadOnlyWorkspace)
+	}
+	if readOnly && len(workload.ArtifactAllowlist) > 0 {
+		return core.RuntimeExecutionResult{}, errors.New("read-only workspace cannot produce artifacts")
+	}
+	if err := a.Runtime.Available(runCtx); err != nil {
+		return core.RuntimeExecutionResult{}, fmt.Errorf("sandbox runtime unavailable: %w", controlProcessError(err, "runtime availability output capture failed"))
+	}
 
 	started := time.Now().UTC()
 	result, err := a.Runtime.Run(runCtx, SandboxRunRequest{
-		Image:      invocation.Image,
-		Command:    slices.Clone(workload.Args),
-		Workspace:  invocation.Workspace,
-		WorkingDir: workload.WorkingDirectory,
-		Env:        cloneStringMap(invocation.Request.Env),
-		Network:    firstNonEmpty(invocation.Network, SandboxNetworkNone),
-		Timeout:    timeout,
-		Limits:     invocation.Request.Limits,
+		Image:             invocation.Image,
+		Command:           slices.Clone(workload.Args),
+		Workspace:         invocation.Workspace,
+		WorkingDir:        workload.WorkingDirectory,
+		Env:               cloneStringMap(invocation.Request.Env),
+		Network:           firstNonEmpty(invocation.Network, SandboxNetworkNone),
+		Timeout:           timeout,
+		Limits:            invocation.Request.Limits,
+		ReadOnlyWorkspace: readOnly,
 	})
 	finished := time.Now().UTC()
 	runResult := core.RuntimeExecutionResult{
@@ -394,7 +411,7 @@ func (a SandboxRuntimeCommandAdapter) RunSandboxedCommand(ctx context.Context, i
 	}
 	if runCtx.Err() != nil {
 		runResult.ResourceUsage.LimitHit = timeoutLimitHit
-		return runResult, fmt.Errorf("sandboxed command timed out after %s: %w", timeout, runCtx.Err())
+		return runResult, errors.Join(fmt.Errorf("sandboxed command timed out after %s: %w", timeout, runCtx.Err()), err)
 	}
 	if err != nil {
 		return runResult, err
@@ -412,7 +429,14 @@ func (a SandboxRuntimeCommandAdapter) RunSandboxedCommand(ctx context.Context, i
 		runResult.Artifacts = slices.Clone(workload.ArtifactAllowlist)
 	}
 	if runResult.ResourceUsage.WorkspaceBytes == 0 && invocation.Workspace != "" {
-		runResult.ResourceUsage.WorkspaceBytes = DirectorySize(invocation.Workspace)
+		size, measureErr := directorySizeContext(runCtx, invocation.Workspace)
+		if measureErr != nil {
+			if runCtx.Err() != nil {
+				runResult.ResourceUsage.LimitHit = timeoutLimitHit
+			}
+			return runResult, fmt.Errorf("sandbox workspace accounting incomplete: %w", measureErr)
+		}
+		runResult.ResourceUsage.WorkspaceBytes = size
 	}
 	return runResult, nil
 }
@@ -482,7 +506,7 @@ func (a SandboxRuntimeContainerBuildAdapter) BuildSandboxedContainer(ctx context
 		return core.RuntimeExecutionResult{}, err
 	}
 	if err := a.Runtime.Available(ctx); err != nil {
-		return core.RuntimeExecutionResult{}, fmt.Errorf("sandbox runtime unavailable: %w", err)
+		return core.RuntimeExecutionResult{}, fmt.Errorf("sandbox runtime unavailable: %w", controlProcessError(err, "runtime availability output capture failed"))
 	}
 	timeout := defaultDuration(invocation.Timeout, time.Hour)
 	timeoutLimitHit := firstNonEmpty(invocation.TimeoutLimitHit, "timeout")
@@ -537,7 +561,7 @@ func (a SandboxRuntimeContainerBuildAdapter) BuildSandboxedContainer(ctx context
 	}
 	if runCtx.Err() != nil {
 		runResult.ResourceUsage.LimitHit = timeoutLimitHit
-		return runResult, fmt.Errorf("sandboxed container build timed out after %s: %w", timeout, runCtx.Err())
+		return runResult, errors.Join(fmt.Errorf("sandboxed container build timed out after %s: %w", timeout, runCtx.Err()), err)
 	}
 	if err != nil {
 		return runResult, err
@@ -556,7 +580,14 @@ func (a SandboxRuntimeContainerBuildAdapter) BuildSandboxedContainer(ctx context
 		return runResult, errors.New("sandboxed container build did not produce a sha256 artifact digest")
 	}
 	if runResult.ResourceUsage.WorkspaceBytes == 0 && invocation.Workspace != "" {
-		runResult.ResourceUsage.WorkspaceBytes = DirectorySize(invocation.Workspace)
+		size, measureErr := directorySizeContext(runCtx, invocation.Workspace)
+		if measureErr != nil {
+			if runCtx.Err() != nil {
+				runResult.ResourceUsage.LimitHit = timeoutLimitHit
+			}
+			return runResult, fmt.Errorf("sandbox workspace accounting incomplete: %w", measureErr)
+		}
+		runResult.ResourceUsage.WorkspaceBytes = size
 	}
 	return runResult, nil
 }
@@ -691,6 +722,40 @@ func ReadSandboxedContainerBuildDigest(path string) (string, error) {
 		return "", fmt.Errorf("invalid sandboxed container-build digest %q", digest)
 	}
 	return digest, nil
+}
+
+// directorySizeContext discards partial accounting on cancellation or I/O
+// failure. Cancellation is cooperative between filesystem operations; it cannot
+// preempt a kernel-blocked filesystem call. Legacy DirectorySize stays unchanged.
+func directorySizeContext(ctx context.Context, root string) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	var total int64
+	err := filepath.WalkDir(root, func(_ string, entry os.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		total += info.Size()
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	return total, nil
 }
 
 func DirectorySize(root string) int64 {

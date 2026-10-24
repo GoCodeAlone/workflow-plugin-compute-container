@@ -74,6 +74,51 @@ network, env, proof, and cleanup behavior under those constraints.
 
 ## Verification
 
+### Native execution bounds
+
+Protected workload and conformance runs explicitly use `--pull never`. Approved
+images must already be cached; execution never falls back to pulling an image.
+Availability has a ten-second ceiling, conformance has thirty seconds, and direct
+command execution defaults to one minute. Explicit request/runtime limits and
+earlier caller deadlines take precedence. Owned cancellation cleanup gets a
+separate ten-second opportunity shared by ownership inspection and removal.
+Cleanup requires the independent per-attempt owner label and a full verified
+container ID before removing that ID in the same runtime scope. Name collisions,
+missing/malformed inspection and unknown creation remain unresolved errors; no
+foreign name is removed and generic inspection failure never proves absence.
+
+`ExecDockerCommandRunner.MaxOutputBytes` bounds aggregate stdout/stderr. A positive
+limit is used exactly; the implementation default is 1 MiB when no positive limit
+is supplied. Writers continue draining through EOF and retain each stream's final
+rolling tail before deterministic aggregate rebalancing. `OutputLimitError`
+implements `OutputCaptureMetadataProvider`, carrying original per-stream counts
+and final truncation flags without putting output into its error text. Adapters
+preserve that typed error across timeout wrapping. Consumers must copy this
+metadata into their run-log provenance before preserving bounded streams.
+`CaptureIncompleteError` has `Complete:false`; its partial streams are withheld.
+Observed bytes from forced pipe closure must never be labeled complete original
+stream sizes. Control-process output is not exposed as workload provenance.
+
+`ReadOnlyWorkspace` is an opt-in policy on `DockerSandboxRuntime`,
+`SandboxRuntimeCommandAdapter` and `SandboxRunRequest`; defaults remain false.
+It keeps the same workspace bind mounted read-only, requires a successful strict
+initial byte-limit walk, rejects writable/shadowing mounts, special files,
+symlinks, writable rootfs/tmpfs/capability overrides and artifact output requests.
+The shared `ValidateReadOnlyPolicy` preflight also rejects image-declared writable
+volumes and checks Docker's advertised memory/swap/CPU/PID controls. The opt-in
+command policy caps memory plus swap at the declared memory limit. Unsupported runtime
+evidence fails closed; read-only control verification currently supports Docker
+with a Linux daemon. A native smoke test must still demonstrate actual configured
+limits and write denial on the selected runtime. No daemon or cgroup settings are
+changed by this policy.
+
+An exclusively owned empty workspace then has zero workload growth; read-only
+mounting cannot stop concurrent host writes. `/tmp` is separately bounded to
+64 MiB. Read-only commands and all conformance containers use `--log-driver none`;
+bounded attached output is distinct from daemon log storage. Legacy writable
+workspace/artifact behavior remains available. Its `WorkspaceBytes` describes
+measurement/reservation, not a portable hard quota on a writable bind mount.
+
 ```sh
 GOWORK=off go test ./... -count=1
 GOWORK=off go vet ./...

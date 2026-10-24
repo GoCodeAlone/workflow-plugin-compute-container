@@ -43,16 +43,8 @@ func (ExecRuntimeCommandRunner) LookPath(name string) (string, error) {
 }
 
 func (ExecRuntimeCommandRunner) Run(ctx context.Context, name string, args ...string) (RuntimeCommandResult, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
-	stdout, err := cmd.Output()
-	result := RuntimeCommandResult{Stdout: stdout}
-	if err != nil {
-		if exitErr := (&exec.ExitError{}); errors.As(err, &exitErr) {
-			result.Stderr = exitErr.Stderr
-		}
-		return result, err
-	}
-	return result, nil
+	out, stderr, err := runBoundedProcess(ctx, nil, 0, name, args...)
+	return RuntimeCommandResult{Stdout: out, Stderr: stderr}, err
 }
 
 type RuntimeBackendProbeOptions struct {
@@ -232,6 +224,8 @@ func ManagedRuntimeScopeName(parts ...string) string {
 }
 
 func (p RuntimeBackendProbe) Probe(ctx context.Context) core.RuntimeBackendReport {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	opts := p.Options.withDefaults()
 	runner := p.Runner
 	if runner == nil {
@@ -285,6 +279,7 @@ func (p RuntimeBackendProbe) Probe(ctx context.Context) core.RuntimeBackendRepor
 		return report
 	}
 	versionResult, err := runner.Run(ctx, opts.Command, opts.VersionArgs...)
+	versionResult.Stdout, versionResult.Stderr, err = boundRunnerOutput(versionResult.Stdout, versionResult.Stderr, err, 0)
 	if err != nil {
 		report.Status = core.RuntimeBackendDegraded
 		report.Reason = redactRuntimeProbeDetail(fmt.Sprintf("runtime version probe failed: %v", err))
@@ -300,10 +295,32 @@ func (p RuntimeBackendProbe) Probe(ctx context.Context) core.RuntimeBackendRepor
 		return report
 	}
 	defer cleanup()
+	name, nameErr := newSandboxContainerName()
+	if nameErr != nil {
+		report.Status = core.RuntimeBackendDegraded
+		report.Reason = "runtime probe ownership unavailable"
+		return report
+	}
+	owner, ownerErr := newSandboxOwner()
+	if ownerErr != nil {
+		report.Status = core.RuntimeBackendDegraded
+		report.Reason = "runtime probe ownership unavailable"
+		return report
+	}
 	conformanceArgs := append([]string(nil), opts.RuntimeScopeArgs...)
 	conformanceArgs = append(conformanceArgs,
 		"run",
 		"--rm",
+		"--pull", "never",
+		"--log-driver", "none",
+		"--name", name,
+		"--label", sandboxOwnerLabel+"="+owner,
+		"--memory", "67108864",
+		"--cpus", "0.25",
+		"--pids-limit", "64",
+		"--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=16m",
+		"--cap-drop", "ALL",
+		"--security-opt", "no-new-privileges",
 		"--network", SandboxNetworkNone,
 		"-v", workspace+":/workspace",
 		"-w", "/workspace",
@@ -313,9 +330,17 @@ func (p RuntimeBackendProbe) Probe(ctx context.Context) core.RuntimeBackendRepor
 	)
 	conformanceArgs = append(conformanceArgs, opts.ConformanceCommand...)
 	conformanceResult, err := runner.Run(ctx, opts.Command, conformanceArgs...)
+	conformanceResult.Stdout, conformanceResult.Stderr, err = boundRunnerOutput(conformanceResult.Stdout, conformanceResult.Stderr, err, 0)
+	failurePrefix := "runtime conformance probe failed"
+	if err != nil || ctx.Err() != nil {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		cleanupErr := removeOwnedSandbox(cleanupCtx, probeCleanupRunner{runner: runner}, opts.Command, ContainerRuntimeScope{Args: opts.RuntimeScopeArgs}, name, owner)
+		cleanupCancel()
+		err = errors.Join(err, ctx.Err(), cleanupErr)
+	}
 	if err != nil {
 		report.Status = core.RuntimeBackendDegraded
-		report.Reason = redactRuntimeProbeDetail(runtimeProbeFailureDetail("runtime conformance probe failed", err, conformanceResult.Stderr))
+		report.Reason = redactRuntimeProbeDetail(runtimeProbeFailureDetail(failurePrefix, err, conformanceResult.Stderr))
 		return report
 	}
 	evidence, err := runtimeBackendConformanceEvidence(conformanceResult.Stdout, report)
@@ -516,6 +541,9 @@ func redactRuntimeProbeDetail(value string) string {
 	value = strings.ReplaceAll(value, "\r", " ")
 	if value == "" {
 		return "runtime probe failed"
+	}
+	if runes := []rune(value); len(runes) > maxRuntimeProbeStderrRunes {
+		value = strings.TrimSpace(string(runes[:maxRuntimeProbeStderrRunes])) + " ... truncated"
 	}
 	return value
 }

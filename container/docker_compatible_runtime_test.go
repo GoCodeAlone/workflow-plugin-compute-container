@@ -867,15 +867,15 @@ func TestDockerCompatibleRuntimeRemovesNamedContainerOnContextCancel(t *testing.
 	if err == nil {
 		t.Fatal("expected canceled runtime error")
 	}
-	if len(runner.calls) != 2 {
-		t.Fatalf("runtime calls = %d want run plus cleanup: %#v", len(runner.calls), runner.calls)
+	if len(runner.calls) != 3 {
+		t.Fatalf("runtime calls = %d want run plus ownership inspection and exact-ID cleanup: %#v", len(runner.calls), runner.calls)
 	}
 	name := dockerArgValue(runner.calls[0], "--name")
 	if !strings.HasPrefix(name, "wfcompute-sandbox-") {
 		t.Fatalf("run args missing sandbox container name: %#v", runner.calls[0])
 	}
-	if !slices.Equal(runner.calls[1], []string{"rm", "-f", name}) {
-		t.Fatalf("cleanup args = %#v want rm -f %s", runner.calls[1], name)
+	if !slices.Equal(runner.calls[2], []string{"rm", "-f", strings.Repeat("a", 64)}) {
+		t.Fatalf("cleanup args = %#v want exact verified ID", runner.calls[2])
 	}
 }
 
@@ -941,6 +941,10 @@ func (r *cancelingDockerCommandRunner) CombinedOutput(ctx context.Context, _ []b
 		r.cancel()
 		<-ctx.Done()
 		return nil, nil, ctx.Err()
+	}
+	if len(args) > 0 && args[0] == "inspect" {
+		owner := strings.TrimPrefix(dockerArgValue(r.calls[0], "--label"), sandboxOwnerLabel+"=")
+		return []byte(`{"id":"` + strings.Repeat("a", 64) + `","owner":"` + owner + `"}`), nil, nil
 	}
 	return nil, nil, nil
 }

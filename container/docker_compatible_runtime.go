@@ -2,14 +2,12 @@ package container
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"slices"
@@ -21,19 +19,20 @@ import (
 )
 
 type DockerSandboxRuntime struct {
-	Tool        string
-	RuntimeName string
-	Runner      DockerCommandRunner
+	Tool              string
+	RuntimeName       string
+	Runner            DockerCommandRunner
+	ReadOnlyWorkspace bool
 }
 
 type DockerCommandRunner interface {
 	CombinedOutput(ctx context.Context, stdin []byte, name string, args ...string) ([]byte, []byte, error)
 }
 
-type ExecDockerCommandRunner struct{}
+type ExecDockerCommandRunner struct{ MaxOutputBytes int64 }
 
-func (ExecDockerCommandRunner) CombinedOutput(ctx context.Context, stdin []byte, name string, args ...string) ([]byte, []byte, error) {
-	return splitOutputContextWithStdin(ctx, stdin, name, args...)
+func (r ExecDockerCommandRunner) CombinedOutput(ctx context.Context, stdin []byte, name string, args ...string) ([]byte, []byte, error) {
+	return runBoundedProcess(ctx, stdin, r.MaxOutputBytes, name, args...)
 }
 
 type dockerRunSpec struct {
@@ -42,11 +41,19 @@ type dockerRunSpec struct {
 	Args          []string
 	EnvFile       string
 	ContainerName string
+	Owner         string
 }
 
 func (r DockerSandboxRuntime) Available(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
 	tool := firstNonEmpty(r.Tool, "docker")
 	out, stderr, err := r.commandRunner().CombinedOutput(ctx, nil, tool, "version")
+	out, stderr, err = boundRunnerOutput(out, stderr, err, 0)
+	var capture OutputCaptureMetadataProvider
+	if errors.As(err, &capture) {
+		return controlProcessError(err, "runtime availability output capture failed")
+	}
 	if err != nil {
 		if message := strings.TrimSpace(string(stderr)); message != "" {
 			return fmt.Errorf("%w: %s", err, message)
@@ -59,40 +66,63 @@ func (r DockerSandboxRuntime) Available(ctx context.Context) error {
 }
 
 func (r DockerSandboxRuntime) Run(ctx context.Context, req SandboxRunRequest) (SandboxRunResult, error) {
-	spec, cleanup, err := r.prepareRun(req)
+	timeout := defaultDuration(req.Timeout, time.Minute)
+	if req.Limits.RuntimeSeconds > 0 && time.Duration(req.Limits.RuntimeSeconds)*time.Second < timeout {
+		timeout = time.Duration(req.Limits.RuntimeSeconds) * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	req.ReadOnlyWorkspace = req.ReadOnlyWorkspace || r.ReadOnlyWorkspace
+	if err := r.ValidateReadOnlyPolicy(ctx, req); err != nil {
+		return SandboxRunResult{}, err
+	}
+	spec, cleanup, err := r.prepareRunContext(ctx, req)
 	if err != nil {
 		return SandboxRunResult{}, err
 	}
 	defer cleanup()
-	if len(spec.RuntimeArgs) > 0 {
-		runtimeScope, err := validateRuntimeScope(spec.Tool, ContainerRuntimeScope{Args: spec.RuntimeArgs})
-		if err != nil {
-			return SandboxRunResult{}, err
-		}
-		spec.RuntimeArgs = runtimeScope.Args
+	runner := r.Runner
+	if runner == nil {
+		runner = ExecDockerCommandRunner{MaxOutputBytes: req.Limits.OutputBytes}
 	}
-	stdout, stderr, err := r.commandRunner().CombinedOutput(ctx, req.Stdin, spec.Tool, spec.CommandArgs()...)
-	if ctx.Err() != nil {
-		r.removeCanceledContainer(spec)
+	out, stderr, err := runner.CombinedOutput(ctx, req.Stdin, spec.Tool, spec.CommandArgs()...)
+	out, stderr, err = boundRunnerOutput(out, stderr, err, req.Limits.OutputBytes)
+	var taskCapture OutputCaptureMetadataProvider
+	if ctx.Err() != nil && !errors.As(err, &taskCapture) {
+		err = &CaptureIncompleteError{Metadata: OutputCaptureMetadata{Complete: false}, Cause: errors.Join(err, ctx.Err())}
+		out, stderr = nil, nil
 	}
-	exitCode := 0
-	if err != nil {
-		exitCode = commandExitCode(err)
+	// Any CLI error may leave a created container running, even with complete
+	// stream EOF. Require the same exact ownership proof as canceled runs.
+	if err != nil || ctx.Err() != nil {
+		err = errors.Join(err, ctx.Err(), r.removeCanceledContainer(spec))
 	}
-	if err != nil && len(stderr) > 0 {
+	var capture OutputCaptureMetadataProvider
+	if errors.As(err, &capture) {
+		// Capture errors carry nonsecret provenance, never output in error text.
+	} else if err != nil && len(stderr) > 0 {
 		err = fmt.Errorf("%w: %s", err, strings.TrimSpace(string(stderr)))
-	} else if err != nil && len(stdout) > 0 {
-		err = fmt.Errorf("%w: %s", err, strings.TrimSpace(string(stdout)))
+	} else if err != nil && len(out) > 0 {
+		err = fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
 	}
-	return SandboxRunResult{
-		ExitCode: exitCode,
-		Stdout:   stdout,
-		Stderr:   stderr,
-		ResourceUsage: core.ResourceUsage{
-			OutputBytes:    int64(len(stdout) + len(stderr)),
-			WorkspaceBytes: DirectorySize(req.Workspace),
-		},
-	}, err
+	// Measurement failures must not reclassify successful process output as
+	// execution-error text; retain output only in its existing result fields.
+	workspaceBytes, measureErr := directorySizeContext(ctx, req.Workspace)
+	if measureErr != nil {
+		err = errors.Join(err, fmt.Errorf("sandbox workspace accounting incomplete: %w", measureErr))
+	}
+	result := SandboxRunResult{ExitCode: commandExitCode(err), Stdout: out, Stderr: stderr, ResourceUsage: core.ResourceUsage{OutputBytes: int64(len(out) + len(stderr)), WorkspaceBytes: workspaceBytes}}
+	result.OutputCapture = OutputCaptureMetadata{Complete: true, StdoutOriginalSizeBytes: int64(len(out)), StderrOriginalSizeBytes: int64(len(stderr))}
+	if capture != nil {
+		result.OutputCapture = capture.CaptureMetadata()
+		if !result.OutputCapture.Complete {
+			result.ResourceUsage = core.ResourceUsage{}
+		} else {
+			result.ResourceUsage.LimitHit = "output"
+			result.ResourceUsage.OutputBytes = result.OutputCapture.StdoutOriginalSizeBytes + result.OutputCapture.StderrOriginalSizeBytes
+		}
+	}
+	return result, err
 }
 
 func (r DockerSandboxRuntime) commandRunner() DockerCommandRunner {
@@ -103,6 +133,10 @@ func (r DockerSandboxRuntime) commandRunner() DockerCommandRunner {
 }
 
 func (r DockerSandboxRuntime) prepareRun(req SandboxRunRequest) (dockerRunSpec, func(), error) {
+	return r.prepareRunContext(context.Background(), req)
+}
+
+func (r DockerSandboxRuntime) prepareRunContext(ctx context.Context, req SandboxRunRequest) (dockerRunSpec, func(), error) {
 	cleanup := func() {}
 	tool := firstNonEmpty(r.Tool, "docker")
 	if strings.TrimSpace(req.Workspace) == "" {
@@ -113,13 +147,19 @@ func (r DockerSandboxRuntime) prepareRun(req SandboxRunRequest) (dockerRunSpec, 
 		return dockerRunSpec{}, cleanup, fmt.Errorf("resolve workspace: %w", err)
 	}
 	workspace = filepath.Clean(workspace)
+	req.ReadOnlyWorkspace = req.ReadOnlyWorkspace || r.ReadOnlyWorkspace
+	if req.ReadOnlyWorkspace {
+		if err := validateReadOnlyWorkspaceContext(ctx, req); err != nil {
+			return dockerRunSpec{}, cleanup, err
+		}
+	}
 	if req.RunAsRoot {
 		restore, err := makeWorkspaceSandboxReadable(workspace)
 		if err != nil {
 			return dockerRunSpec{}, cleanup, err
 		}
 		cleanup = restore
-	} else if tool == "nerdctl" {
+	} else if tool == "nerdctl" && !req.ReadOnlyWorkspace {
 		restore, err := makeWorkspaceSandboxWritable(workspace)
 		if err != nil {
 			return dockerRunSpec{}, cleanup, err
@@ -133,18 +173,27 @@ func (r DockerSandboxRuntime) prepareRun(req SandboxRunRequest) (dockerRunSpec, 
 	args := []string{
 		"run",
 		"--rm",
+		"--pull", "never",
 		"--network", network,
 		"--cap-drop", "ALL",
 		"--security-opt", "no-new-privileges",
 		"--pids-limit", "256",
 		"--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=64m",
 	}
+	if req.ReadOnlyWorkspace {
+		args = append(args, "--log-driver", "none")
+	}
 	containerName, err := newSandboxContainerName()
 	if err != nil {
 		cleanup()
 		return dockerRunSpec{}, cleanup, err
 	}
-	args = append(args, "--name", containerName)
+	owner, err := newSandboxOwner()
+	if err != nil {
+		cleanup()
+		return dockerRunSpec{}, cleanup, err
+	}
+	args = append(args, "--name", containerName, "--label", sandboxOwnerLabel+"="+owner)
 	if len(req.Stdin) > 0 {
 		args = append(args, "-i")
 	}
@@ -178,6 +227,9 @@ func (r DockerSandboxRuntime) prepareRun(req SandboxRunRequest) (dockerRunSpec, 
 	}
 	if req.Limits.MemoryBytes > 0 {
 		args = append(args, "--memory", fmt.Sprintf("%d", req.Limits.MemoryBytes))
+		if req.ReadOnlyWorkspace {
+			args = append(args, "--memory-swap", fmt.Sprintf("%d", req.Limits.MemoryBytes))
+		}
 	}
 	if req.Limits.CPUPercent > 0 {
 		args = append(args, "--cpus", fmt.Sprintf("%.2f", float64(req.Limits.CPUPercent)/100))
@@ -187,7 +239,11 @@ func (r DockerSandboxRuntime) prepareRun(req SandboxRunRequest) (dockerRunSpec, 
 		cleanup()
 		return dockerRunSpec{}, cleanup, err
 	}
-	args = append(args, "-v", workspace+":/workspace:rw", "-w", workingDir)
+	mode := "rw"
+	if req.ReadOnlyWorkspace {
+		mode = "ro"
+	}
+	args = append(args, "-v", workspace+":/workspace:"+mode, "-w", workingDir)
 	for _, mount := range req.DataMounts {
 		hostPath, containerPath, err := validateSandboxMount(mount)
 		if err != nil {
@@ -223,17 +279,16 @@ func (r DockerSandboxRuntime) prepareRun(req SandboxRunRequest) (dockerRunSpec, 
 		cleanup()
 		return dockerRunSpec{}, cleanup, err
 	}
-	return dockerRunSpec{Tool: tool, RuntimeArgs: runtimeScope.Args, Args: args, EnvFile: envFile, ContainerName: containerName}, cleanup, nil
+	return dockerRunSpec{Tool: tool, RuntimeArgs: runtimeScope.Args, Args: args, EnvFile: envFile, ContainerName: containerName, Owner: owner}, cleanup, nil
 }
 
-func (r DockerSandboxRuntime) removeCanceledContainer(spec dockerRunSpec) {
+func (r DockerSandboxRuntime) removeCanceledContainer(spec dockerRunSpec) error {
 	if spec.ContainerName == "" {
-		return
+		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	args := appendRuntimeScopeArgs(ContainerRuntimeScope{Args: spec.RuntimeArgs}, "rm", "-f", spec.ContainerName)
-	_, _, _ = r.commandRunner().CombinedOutput(ctx, nil, spec.Tool, args...)
+	return removeOwnedSandbox(ctx, r.commandRunner(), spec.Tool, ContainerRuntimeScope{Args: spec.RuntimeArgs}, spec.ContainerName, spec.Owner)
 }
 
 func newSandboxContainerName() (string, error) {
@@ -674,15 +729,7 @@ func combinedOutputContextWithStdin(ctx context.Context, stdin []byte, name stri
 }
 
 func splitOutputContextWithStdin(ctx context.Context, stdin []byte, name string, args ...string) ([]byte, []byte, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
-	if len(stdin) > 0 {
-		cmd.Stdin = bytes.NewReader(stdin)
-	}
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	return stdout.Bytes(), stderr.Bytes(), err
+	return runBoundedProcess(ctx, stdin, 0, name, args...)
 }
 
 func commandExitCode(err error) int {
